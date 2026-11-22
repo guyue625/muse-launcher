@@ -26,6 +26,8 @@ public final class LaunchCommands {
     public final boolean addAccount;
     public final boolean hasDelAccount;    // 是否带了 del_account 参数
     public final long delAccountId;        // -1 = 无效
+    public final boolean hasDarkTheme;     // 是否带了 dark_theme 参数
+    public final boolean darkTheme;
 
     private LaunchCommands(Map<String, Object> e) {
         showDrawer = bool(e, "show_drawer");
@@ -42,6 +44,8 @@ public final class LaunchCommands {
         addAccount = bool(e, "add_account");
         hasDelAccount = e.containsKey("del_account");
         delAccountId = lon(e, "del_account");
+        hasDarkTheme = e.containsKey("dark_theme");
+        darkTheme = bool(e, "dark_theme");
     }
 
     /** release 构建（BuildConfig.DEBUG == false）不响应任何调试参数 */

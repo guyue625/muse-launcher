@@ -30,6 +30,8 @@ public class LaunchCommandsTest {
         assertFalse(c.addAccount);
         assertFalse(c.hasDelAccount);
         assertEquals(-1L, c.delAccountId);
+        assertFalse(c.hasDarkTheme);
+        assertFalse(c.darkTheme);
     }
 
     @Test
@@ -53,6 +55,7 @@ public class LaunchCommandsTest {
         e.put("dump_auth", true);
         e.put("add_account", true);
         e.put("del_account", 9L);
+        e.put("dark_theme", true);
 
         LaunchCommands c = LaunchCommands.parse(e);
         assertTrue(c.showDrawer);
@@ -69,6 +72,8 @@ public class LaunchCommandsTest {
         assertTrue(c.addAccount);
         assertTrue(c.hasDelAccount);
         assertEquals(9L, c.delAccountId);
+        assertTrue(c.hasDarkTheme);
+        assertTrue(c.darkTheme);
     }
 
     /** am start 类型不匹配时（如 --es 传了本应 --ez 的键），必须安全回退到默认值而不是崩溃 */

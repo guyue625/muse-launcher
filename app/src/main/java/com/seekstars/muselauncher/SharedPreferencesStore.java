@@ -31,6 +31,26 @@ public class SharedPreferencesStore implements KeyValueStore {
 
     @Override
     public void putAll(Map<String, Object> values) {
+        editor(values).apply();
+    }
+
+    @Override
+    public boolean commitAll(Map<String, Object> values) {
+        Map<String, ?> previous = prefs.getAll();
+        if (editor(values).commit()) return true;
+        // commit 失败也可能先发布内存值，恢复旧快照，不能让下一次启动看到未保存令牌。
+        SharedPreferences.Editor rollback = prefs.edit().clear();
+        for (Map.Entry<String, ?> en : previous.entrySet()) {
+            Object v = en.getValue();
+            if (v instanceof Long) rollback.putLong(en.getKey(), (Long) v);
+            else if (v instanceof Boolean) rollback.putBoolean(en.getKey(), (Boolean) v);
+            else if (v instanceof String) rollback.putString(en.getKey(), (String) v);
+        }
+        rollback.commit();
+        return false;
+    }
+
+    private SharedPreferences.Editor editor(Map<String, Object> values) {
         SharedPreferences.Editor e = prefs.edit();
         for (Map.Entry<String, Object> en : values.entrySet()) {
             Object v = en.getValue();
@@ -38,7 +58,7 @@ public class SharedPreferencesStore implements KeyValueStore {
             else if (v instanceof Boolean) e.putBoolean(en.getKey(), (Boolean) v);
             else if (v instanceof String) e.putString(en.getKey(), (String) v);
         }
-        e.apply();
+        return e;
     }
 
     @Override

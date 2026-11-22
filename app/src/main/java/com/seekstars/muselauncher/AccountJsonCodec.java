@@ -21,6 +21,8 @@ final class AccountJsonCodec {
                 o.put("id", a.id);
                 o.put("name", a.name);
                 o.put("avatar", a.avatar);
+                o.put("hasImage", a.hasImage);
+                if (a.shortcutToken != null) o.put("shortcut_token", a.shortcutToken);
                 o.put("proxy", a.proxy);
                 JSONArray tagArr = new JSONArray();
                 for (String t : a.tags) tagArr.put(t);
@@ -53,6 +55,10 @@ final class AccountJsonCodec {
                 JSONObject o = arr.getJSONObject(i);
                 Account a = new Account(o.getLong("id"), o.getString("name"));
                 a.avatar = o.optString("avatar", "m");
+                a.hasImage = o.optBoolean("hasImage", false);
+                Object token = o.opt("shortcut_token");
+                a.shortcutToken = token instanceof String && !((String) token).isEmpty()
+                        ? (String) token : null;
                 a.proxy = o.optString("proxy", "");
                 JSONArray tagArr = o.optJSONArray("tags");
                 if (tagArr != null) {

@@ -10,8 +10,8 @@
     </item>
     <item>
         <shape>
-            <solid android:color="#1414171C" />
-            <stroke android:width="1.5dp" android:color="#2E3947"
+            <solid android:color="@color/add_card_bg" />
+            <stroke android:width="1.5dp" android:color="@color/add_card_stroke"
                 android:dashWidth="5dp" android:dashGap="4dp" />
             <corners android:radius="14dp" />
         </shape>

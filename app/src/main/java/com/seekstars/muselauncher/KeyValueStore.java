@@ -14,6 +14,12 @@ public interface KeyValueStore {
     /** 原子批量写入（同一 editor/事务），value 支持 String / Long / Boolean */
     void putAll(Map<String, Object> values);
 
+    /** 关键配置写入需得到持久化结果；测试实现默认沿用原子 putAll。 */
+    default boolean commitAll(Map<String, Object> values) {
+        putAll(values);
+        return true;
+    }
+
     void putString(String key, String value);
 
     void putLong(String key, long value);

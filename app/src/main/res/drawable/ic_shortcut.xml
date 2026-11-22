@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <!-- 托盘：发送到桌面 -->
+    <path
+        android:pathData="M5,12 L5,19 Q5,21 7,21 L17,21 Q19,21 19,19 L19,12"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+    <!-- 向下箭头 -->
+    <path
+        android:pathData="M12,3 L12,13.5 M7.8,9.7 L12,13.9 L16.2,9.7"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+</vector>

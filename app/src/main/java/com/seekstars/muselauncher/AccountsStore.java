@@ -19,6 +19,7 @@ import java.util.Map;
 public class AccountsStore {
     private static final String PREFS = "accounts";
     private static final String KEY_FULLSCREEN = "fullscreen";
+    private static final String KEY_THEME = "theme_mode";
 
     private final KeyValueStore prefs;
     private final List<Account> accounts = new ArrayList<>();
@@ -73,19 +74,21 @@ public class AccountsStore {
         }
     }
 
-    public synchronized void save() {
+    public synchronized boolean save() {
         try {
             String json = AccountJsonCodec.toJson(accounts);
-            if (json == null) return; // 序列化异常：跳过本次写盘，保留旧数据
+            if (json == null) return false;
             Map<String, Object> vals = new HashMap<>();
             String prevList = prefs.getString("list", null);
-            if (prevList != null) vals.put("list_prev", prevList); // 滚动备份
+            if (prevList != null) vals.put("list_prev", prevList);
             vals.put("list", json);
             vals.put("nextId", nextId);
             vals.put("currentId", currentId);
-            prefs.putAll(vals);
+            if (prefs.commitAll(vals)) return true;
         } catch (Exception ignored) {
         }
+        load(); // 不发布未保存的账号配置或快捷方式令牌
+        return false;
     }
 
     /**
@@ -133,21 +136,20 @@ public class AccountsStore {
         return a;
     }
 
-    public synchronized void rename(long id, String name) {
+    public synchronized boolean rename(long id, String name) {
         Account a = findById(id);
-        if (a != null) {
-            a.name = name;
-            save();
-        }
+        if (a == null) return false;
+        a.name = name;
+        return save();
     }
 
-    public synchronized void remove(long id) {
+    public synchronized boolean remove(long id) {
         Account a = findById(id);
         if (a != null) accounts.remove(a);
         if (currentId == id) {
             currentId = accounts.isEmpty() ? -1 : accounts.get(0).id;
         }
-        save();
+        return save();
     }
 
     public synchronized void setCurrent(long id) {
@@ -163,5 +165,14 @@ public class AccountsStore {
 
     public void setFullscreen(boolean v) {
         prefs.putBoolean(KEY_FULLSCREEN, v);
+    }
+
+    /** 默认夜间模式，切到日间存 "light"，切回夜间存 "dark" */
+    public boolean isDarkTheme() {
+        return !"light".equals(prefs.getString(KEY_THEME, "dark"));
+    }
+
+    public void setDarkTheme(boolean dark) {
+        prefs.putString(KEY_THEME, dark ? "dark" : "light");
     }
 }

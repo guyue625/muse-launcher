@@ -1,23 +1,36 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#0D0E11</color>
-    <color name="chat_bg">#121316</color>
-    <color name="rail_bg">#0F1114</color>
-    <color name="drawer_bg">#121419</color>
-    <color name="bubble">#1D1F24</color>
-    <color name="text_primary">#E9EBEE</color>
-    <color name="text_muted">#8A9099</color>
-    <color name="text_dim">#686E78</color>
-    <color name="blue">#3D7FFF</color>
-    <color name="green">#34C759</color>
-    <color name="line">#23262D</color>
-    <color name="row_pressed">#191C22</color>
-    <color name="row_active">#1B2740</color>
-    <color name="input_bg">#0F1114</color>
-    <color name="btn_gray">#22252C</color>
-    <color name="icon_gray">#7D838C</color>
-    <color name="del_btn_bg">#8C2F36</color>
-    <color name="splash_bg">#E6090A0C</color>
+    <!-- 日间模式配色（与 muse.ai 浅色主题 #FCFCFC 协调） -->
+    <color name="bg">#F2F4F7</color>
+    <color name="chat_bg">#FCFCFC</color>
+    <color name="rail_bg">#EFF1F5</color>
+    <color name="drawer_bg">#F7F8FA</color>
+    <color name="card_bg">#FFFFFF</color>
+    <color name="bubble">#FFFFFF</color>
+    <color name="text_primary">#17191E</color>
+    <color name="text_muted">#5F6672</color>
+    <color name="text_dim">#8C93A0</color>
+    <color name="icon_primary">#4A515C</color>
+    <color name="icon_gray">#6B7280</color>
+    <color name="icon_search">#8A919E</color>
+    <color name="blue">#2F7CF6</color>
+    <color name="green">#28B44D</color>
+    <color name="line">#DCE1E8</color>
+    <color name="row_pressed">#E5E9F0</color>
+    <color name="row_active">#E3EEFF</color>
+    <color name="input_bg">#FFFFFF</color>
+    <color name="btn_gray">#E6EAF0</color>
+    <color name="btn_gray_text">#2C323C</color>
+    <color name="add_card_bg">#FFFFFF</color>
+    <color name="add_card_stroke">#C5D0DF</color>
+    <color name="rail_add_stroke">#B8C5D6</color>
+    <color name="dot_off">#B8BFC9</color>
+    <color name="mtile_bg">#EBF1FA</color>
+    <color name="del_btn_bg">#D63B46</color>
+    <color name="splash_bg">#EBF7F8FA</color>
     <color name="m_blue">#2F7CF6</color>
     <color name="ic_launcher_bg">#FFFFFF</color>
+    <color name="fab_bg">#F5FFFFFF</color>
+    <color name="fab_stroke">#2F7CF6</color>
+    <color name="fab_text">#17191E</color>
 </resources>

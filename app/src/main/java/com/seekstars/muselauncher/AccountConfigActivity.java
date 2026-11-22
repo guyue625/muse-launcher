@@ -1,6 +1,9 @@
 package com.seekstars.muselauncher;
 
-import android.graphics.Typeface;
+import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -17,15 +20,19 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.EditText;
 import android.widget.TextView;
+import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
-/** 账号配置页：头像 / 名称 / 代理 / 标签，代理测活 */
+/** 账号配置页：头像（文字/图片） / 名称 / 代理 / 标签，代理测活，桌面快捷方式 */
 public class AccountConfigActivity extends AppCompatActivity {
 
     private static final String TEST_URL = "https://www.gstatic.com/generate_204";
@@ -37,7 +44,9 @@ public class AccountConfigActivity extends AppCompatActivity {
     private AccountsStore store;
     private Account account;
 
-    private TextView tile;
+    private android.widget.FrameLayout tileFrame;
+    private TextView avatarStatus;
+    private TextView avatarClearBtn;
     private EditText avatarInput;
     private EditText nameInput;
     private EditText proxyInput;
@@ -45,6 +54,17 @@ public class AccountConfigActivity extends AppCompatActivity {
     private TextView detectBtn;
     private TextView testBtn;
     private TextView testStatus;
+
+    /** 头像图片草稿：选择后仅驻内存预览，点保存才写盘（失败/取消不污染正在使用的配置） */
+    private byte[] pendingPng;
+    private Bitmap pendingPreview;
+    private boolean pendingClear;
+    private Uri importingUri;
+    private Thread imageThread;
+    private int imageGeneration;
+    private boolean importing;
+
+    private ActivityResultLauncher<String[]> pickImage;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Runnable timeoutRunnable;
@@ -69,7 +89,9 @@ public class AccountConfigActivity extends AppCompatActivity {
             return;
         }
 
-        tile = findViewById(R.id.cfgTile);
+        tileFrame = findViewById(R.id.cfgTile);
+        avatarStatus = findViewById(R.id.cfgAvatarStatus);
+        avatarClearBtn = findViewById(R.id.cfgAvatarClear);
         avatarInput = findViewById(R.id.cfgAvatar);
         nameInput = findViewById(R.id.cfgName);
         proxyInput = findViewById(R.id.cfgProxy);
@@ -83,10 +105,33 @@ public class AccountConfigActivity extends AppCompatActivity {
         testBtn.setOnClickListener(v -> testProxy());
         detectBtn.setOnClickListener(v -> detectProxy());
 
+        // 头像图片：系统文件选择器（位图 + SVG），解码裁方后仅存草稿，保存时才写盘
+        pickImage = registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
+            if (uri != null) onImagePicked(uri);
+        });
+        findViewById(R.id.cfgAvatarPick).setOnClickListener(v ->
+                pickImage.launch(new String[]{"image/*", "image/svg+xml"}));
+        avatarClearBtn.setOnClickListener(v -> {
+            cancelImageImport();
+            pendingPng = null;
+            pendingPreview = null;
+            pendingClear = true;
+            updateTile();
+        });
+        findViewById(R.id.cfgShortcut).setOnClickListener(v -> createShortcut());
+
         avatarInput.setText(account.avatar);
         nameInput.setText(account.name);
         proxyInput.setText(account.proxy);
         tagsInput.setText(TextUtils.join(", ", account.tags));
+        if (savedInstanceState != null) {
+            pendingPng = savedInstanceState.getByteArray("avatar_png");
+            pendingPreview = pendingPng != null
+                    ? BitmapFactory.decodeByteArray(pendingPng, 0, pendingPng.length) : null;
+            pendingClear = savedInstanceState.getBoolean("avatar_clear");
+            String uri = savedInstanceState.getString("avatar_import_uri");
+            if (uri != null) avatarInput.post(() -> onImagePicked(Uri.parse(uri)));
+        }
         updateTile();
         avatarInput.addTextChangedListener(new TextWatcher() {
             @Override
@@ -123,7 +168,16 @@ public class AccountConfigActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onSaveInstanceState(Bundle state) {
+        state.putByteArray("avatar_png", pendingPng);
+        state.putBoolean("avatar_clear", pendingClear);
+        if (importingUri != null) state.putString("avatar_import_uri", importingUri.toString());
+        super.onSaveInstanceState(state);
+    }
+
+    @Override
     protected void onDestroy() {
+        cancelImageImport();
         if (testWebView != null) {
             testWebView.destroy();
             testWebView = null;
@@ -135,40 +189,154 @@ public class AccountConfigActivity extends AppCompatActivity {
         super.onDestroy();
     }
 
+    /** 预览磁贴：图片头像（新选草稿优先）优先，否则文字实时预览（按字宽自动缩放） */
     private void updateTile() {
-        String av = avatarInput.getText().toString().trim();
-        if (av.length() > 2) av = av.substring(0, 2);
-        tile.setText(av.isEmpty() ? "m" : av);
+        Bitmap bmp = pendingPreview;
+        if (bmp == null && !pendingClear && account.hasImage) {
+            bmp = AvatarStore.load(this, account.id);
+        }
+        tileFrame.removeAllViews();
+        if (bmp != null) {
+            tileFrame.addView(AvatarTile.image(this, dp(64), bmp));
+        } else {
+            tileFrame.addView(AvatarTile.text(this, dp(64), 32f,
+                    avatarInput.getText().toString()));
+        }
+        boolean hasImg = bmp != null;
+        avatarStatus.setVisibility(hasImg ? View.VISIBLE : View.GONE);
+        avatarClearBtn.setVisibility(hasImg ? View.VISIBLE : View.GONE);
+    }
+
+    /** 异步结果按代次发布；清除、退出或新选择不会被旧解码结果覆盖。 */
+    private void onImagePicked(Uri uri) {
+        cancelImageImport();
+        importing = true;
+        importingUri = uri;
+        int generation = imageGeneration;
+        updateSaveButtons();
+        imageThread = new Thread(() -> {
+            byte[] png = AvatarStore.readAndConvert(getApplicationContext(), uri);
+            Bitmap preview = png != null
+                    ? BitmapFactory.decodeByteArray(png, 0, png.length) : null;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || generation != imageGeneration) return;
+                importing = false;
+                importingUri = null;
+                imageThread = null;
+                updateSaveButtons();
+                if (preview == null) {
+                    Toast.makeText(this, R.string.toast_avatar_invalid,
+                            Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                pendingPng = png;
+                pendingPreview = preview;
+                pendingClear = false;
+                updateTile();
+            });
+        }, "avatar-convert");
+        imageThread.start();
+    }
+
+    private void cancelImageImport() {
+        imageGeneration++;
+        if (imageThread != null) imageThread.interrupt();
+        imageThread = null;
+        importingUri = null;
+        importing = false;
+        updateSaveButtons();
+    }
+
+    private void updateSaveButtons() {
+        View save = findViewById(R.id.cfgSave);
+        View shortcut = findViewById(R.id.cfgShortcut);
+        if (save != null) save.setEnabled(!importing);
+        if (shortcut != null) shortcut.setEnabled(!importing);
+    }
+
+    /** 创建桌面快捷方式：随机令牌首次生成并入库；名称/头像取该账号已保存的状态 */
+    private void createShortcut() {
+        if (importing || !refreshAccount()) return;
+        if (account.shortcutToken == null) {
+            account.shortcutToken = UUID.randomUUID().toString();
+            if (!store.save()) {
+                Toast.makeText(this, R.string.toast_config_save_failed, Toast.LENGTH_SHORT).show();
+                refreshAccount();
+                return;
+            }
+        }
+        boolean ok = ShortcutsHelper.pin(this, account, AvatarStore.shortcutIcon(this, account));
+        Toast.makeText(this,
+                ok ? R.string.toast_shortcut_requested : R.string.toast_shortcut_unsupported,
+                Toast.LENGTH_SHORT).show();
+    }
+
+    /**
+     * 写盘前重载磁盘最新数据并重取本账号引用：本页持有独立 store 快照，
+     * 直接整量 save 会用陈旧数据覆盖主界面期间的改动（甚至复活已删除账号）。
+     * 返回 false 表示账号已被删除，直接放弃本次写入。
+     */
+    private boolean refreshAccount() {
+        store.reload();
+        Account fresh = store.findById(account.id);
+        if (fresh == null) {
+            finish();
+            return false;
+        }
+        account = fresh;
+        return true;
+    }
+
+    private int dp(int v) {
+        return Math.round(getResources().getDisplayMetrics().density * v);
     }
 
     private void save() {
-        persist();
-        finish();
+        if (persist()) finish();
     }
 
-    /** 读取输入并写入 store（不退出页面，供测活通过后自动入库复用） */
-    private void persist() {
-        String avatar = avatarInput.getText().toString().trim();
-        if (avatar.isEmpty()) avatar = "m";
-        if (avatar.length() > 2) avatar = avatar.substring(0, 2);
-        account.avatar = avatar;
-
-        String name = nameInput.getText().toString().trim();
-        if (!name.isEmpty()) {
-            account.name = name.length() > 16 ? name.substring(0, 16) : name;
+    /** 图片先原子写入，元数据失败时恢复旧图片；只有两者成功才清除草稿。 */
+    private boolean persist() {
+        if (importing || !refreshAccount()) return false;
+        byte[] previousImage = null;
+        if (pendingPng != null) {
+            previousImage = AvatarStore.savedBytes(this, account.id);
+            if (account.hasImage && previousImage == null
+                    || !AvatarStore.persist(this, account.id, pendingPng)) {
+                Toast.makeText(this, R.string.toast_avatar_save_failed, Toast.LENGTH_SHORT).show();
+                return false;
+            }
+            account.hasImage = true;
+        } else if (pendingClear) {
+            account.hasImage = false;
         }
-
+        account.avatar = AvatarTile.normalize(avatarInput.getText().toString());
+        String name = nameInput.getText().toString().trim();
+        if (!name.isEmpty()) account.name = name.length() > 16 ? name.substring(0, 16) : name;
         account.proxy = proxyInput.getText().toString().trim();
-
         List<String> tags = new ArrayList<>();
         for (String t : tagsInput.getText().toString().split("[,，]")) {
             String tag = t.trim();
             if (!tag.isEmpty()) tags.add(tag.length() > 8 ? tag.substring(0, 8) : tag);
         }
         account.tags = tags;
-
-        store.save();
-        setResult(RESULT_OK);
+        if (!store.save()) {
+            if (pendingPng != null) {
+                if (previousImage != null) AvatarStore.persist(this, account.id, previousImage);
+                else AvatarStore.clear(this, account.id);
+            }
+            Toast.makeText(this, R.string.toast_config_save_failed, Toast.LENGTH_SHORT).show();
+            refreshAccount();
+            return false;
+        }
+        if (pendingClear) AvatarStore.clear(this, account.id);
+        pendingPng = null;
+        pendingPreview = null;
+        pendingClear = false;
+        setResult(RESULT_OK, new Intent().putExtra("account_id", account.id));
+        ShortcutsHelper.refresh(this, account, AvatarStore.shortcutIcon(this, account));
+        updateTile();
+        return true;
     }
 
     // ---------- 代理测活 ----------

@@ -225,6 +225,30 @@ public class AccountsStoreTest {
         assertNull(s.takeLoadNotice());
     }
 
+    @Test
+    public void saveFailure_restoresPersistedMetadataAndToken() {
+        FakeKv kv = new FakeKv();
+        AccountsStore store = new AccountsStore(kv);
+        Account a = store.addDefault();
+        String oldName = a.name;
+        KeyValueStore failing = new KeyValueStore() {
+            public String getString(String k, String d) { return kv.getString(k, d); }
+            public long getLong(String k, long d) { return kv.getLong(k, d); }
+            public boolean getBoolean(String k, boolean d) { return kv.getBoolean(k, d); }
+            public void putAll(Map<String, Object> v) { throw new IllegalStateException("disk full"); }
+            public void putString(String k, String v) { kv.putString(k, v); }
+            public void putLong(String k, long v) { kv.putLong(k, v); }
+            public void putBoolean(String k, boolean v) { kv.putBoolean(k, v); }
+        };
+        AccountsStore draft = new AccountsStore(failing);
+        draft.findById(a.id).name = "未保存";
+        draft.findById(a.id).shortcutToken = "unsaved-token";
+        org.junit.Assert.assertFalse(draft.save());
+        assertEquals(oldName, draft.findById(a.id).name);
+        assertNull(draft.findById(a.id).shortcutToken);
+        assertEquals(oldName, new AccountsStore(kv).findById(a.id).name);
+    }
+
     /** reload() 与构造行为一致 */
     @Test
     public void reload_rerunsRecovery() {
@@ -236,5 +260,21 @@ public class AccountsStoreTest {
         s.reload();
         assertEquals("recovered", s.takeLoadNotice());
         assertEquals(1, s.all().size());
+    }
+
+    /** 日夜模式默认夜间，切换后跨实例持久化 */
+    @Test
+    public void darkTheme_defaultDarkAndPersists() {
+        FakeKv kv = new FakeKv();
+        AccountsStore s1 = new AccountsStore(kv);
+        assertTrue(s1.isDarkTheme());
+
+        s1.setDarkTheme(false);
+        AccountsStore s2 = new AccountsStore(kv);
+        org.junit.Assert.assertFalse(s2.isDarkTheme());
+
+        s2.setDarkTheme(true);
+        AccountsStore s3 = new AccountsStore(kv);
+        assertTrue(s3.isDarkTheme());
     }
 }

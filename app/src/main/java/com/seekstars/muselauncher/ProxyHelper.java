@@ -15,6 +15,8 @@ public class ProxyHelper {
 
     private static ProxyController controller;
     private static final Executor EXEC = Runnable::run;
+    /** 记录最近一次已下发给 ProxyController 的归一化值，避免 onResume 重复重置网络栈 */
+    private static String lastApplied;
 
     private ProxyHelper() {
     }
@@ -25,20 +27,24 @@ public class ProxyHelper {
 
     public static void apply(String proxy) {
         if (!supported()) return;
+        String trimmed = proxy == null ? "" : proxy.trim();
+        String target = trimmed.isEmpty() ? "" : normalize(trimmed);
+        if (target.equals(lastApplied)) return;
         try {
             if (controller == null) controller = ProxyController.getInstance();
-            if (proxy == null || proxy.trim().isEmpty()) {
+            if (target.isEmpty()) {
                 controller.clearProxyOverride(EXEC, () -> {
                 });
+                lastApplied = "";
                 return;
             }
-            String rule = normalize(proxy.trim());
             ProxyConfig config = new ProxyConfig.Builder()
-                    .addProxyRule(rule)
+                    .addProxyRule(target)
                     .addDirect()
                     .build();
             controller.setProxyOverride(config, EXEC, () -> {
             });
+            lastApplied = target;
         } catch (Exception ignored) {
         }
     }

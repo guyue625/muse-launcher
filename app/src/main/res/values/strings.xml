@@ -34,6 +34,20 @@
     <string name="cd_collapse">收起列表</string>
     <string name="cd_add">新建账号环境</string>
     <string name="cd_fullscreen">全屏显示当前账号</string>
+    <string name="cd_theme_to_light">切换到日间模式</string>
+    <string name="cd_theme_to_dark">切换到夜间模式</string>
+    <string name="toast_theme_light">已切换为日间模式</string>
+    <string name="toast_theme_dark">已切换为夜间模式</string>
+    <string name="btn_back_to_muse">返回 Muse</string>
+    <string name="chooser_pick_file">选择附件</string>
+    <string name="toast_mic_denied">未授予麦克风权限，请在系统应用设置中开启后重试</string>
+    <string name="toast_perm_denied">未授予所需权限，请在系统应用设置中开启后重试</string>
+    <string name="perm_dialog_title">网页权限请求</string>
+    <string name="perm_dialog_msg_mic">允许 %s 使用麦克风吗？</string>
+    <string name="perm_dialog_msg_cam">允许 %s 使用摄像头吗？</string>
+    <string name="perm_dialog_msg_both">允许 %s 使用麦克风和摄像头吗？</string>
+    <string name="btn_allow">允许</string>
+    <string name="btn_deny">拒绝</string>
     <string name="cd_rename">重命名</string>
     <string name="cd_delete">删除账号</string>
     <string name="cd_config">账号配置</string>
@@ -42,7 +56,21 @@
     <!-- 账号配置页 -->
     <string name="config_title">账号配置</string>
     <string name="config_avatar">头像</string>
-    <string name="config_avatar_hint">1-2 个字符或 Emoji</string>
+    <string name="config_avatar_hint">1-2 个字符或 Emoji，也可上传图片</string>
+    <string name="config_avatar_pick">选择图片</string>
+    <string name="config_avatar_clear">清除图片</string>
+    <string name="config_avatar_image_on">已使用图片头像</string>
+    <string name="config_avatar_support">PNG / JPG / WebP / SVG</string>
+    <string name="toast_avatar_invalid">无法读取所选图片（支持 PNG / JPG / WebP / SVG）</string>
+    <string name="toast_avatar_save_failed">头像图片写入失败，已保留原头像</string>
+    <string name="toast_config_save_failed">配置保存失败，请检查存储空间后重试</string>
+    <!-- 桌面快捷方式 -->
+    <string name="config_shortcut_title">桌面快捷方式</string>
+    <string name="config_shortcut_create">创建快捷方式</string>
+    <string name="config_shortcut_hint">按已保存的名称与头像在桌面创建图标，点击直接打开该账号并进入全屏。改名或换头像会同步更新；系统桌面不支持时会提示。</string>
+    <string name="toast_shortcut_requested">已提交创建请求，请在系统弹窗中确认</string>
+    <string name="toast_shortcut_unsupported">当前桌面不支持固定快捷方式</string>
+    <string name="toast_shortcut_invalid">该账号已删除或快捷方式已失效</string>
     <string name="config_name">名称</string>
     <string name="config_proxy">代理</string>
     <string name="config_proxy_ph">如 127.0.0.1:7890 或 socks5://127.0.0.1:1080</string>

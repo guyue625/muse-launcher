@@ -1,6 +1,7 @@
 package com.seekstars.muselauncher;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -75,5 +76,50 @@ public class AccountJsonCodecTest {
         assertEquals("m", out.get(0).avatar);
         assertEquals("", out.get(0).proxy);
         assertTrue(out.get(0).tags.isEmpty());
+        // 新字段缺省：无图片头像、无快捷方式令牌
+        assertFalse(out.get(0).hasImage);
+        assertNull(out.get(0).shortcutToken);
+    }
+
+    /** 图片头像与快捷方式令牌：完整往返 */
+    @Test
+    public void roundTrip_preservesImageAndShortcutToken() {
+        List<Account> l = new ArrayList<>();
+        Account a = new Account(7, "店小二");
+        a.avatar = "店";
+        a.hasImage = true;
+        a.shortcutToken = "tok-abc-123";
+        l.add(a);
+        Account b = new Account(9, "Muse 9");
+        b.hasImage = false;
+        l.add(b);
+
+        String json = AccountJsonCodec.toJson(l);
+        List<Account> back = AccountJsonCodec.fromJsonOrNull(json);
+        assertEquals(2, back.size());
+        assertTrue(back.get(0).hasImage);
+        assertEquals("tok-abc-123", back.get(0).shortcutToken);
+        assertFalse(back.get(1).hasImage);
+        assertNull(back.get(1).shortcutToken);
+    }
+
+    @Test
+    public void shortcutToken_wrongTypeAndEmptyStringAreRejected() {
+        for (String value : new String[]{"42", "true", "null", "\"\"", "{}"}) {
+            List<Account> out = AccountJsonCodec.fromJsonOrNull(
+                    "[{\"id\":4,\"name\":\"n\",\"shortcut_token\":" + value + "}]");
+            assertNull(out.get(0).shortcutToken);
+        }
+    }
+
+    /** 旧数据 + hasImage 非法类型：回退默认值，不影响其余字段 */
+    @Test
+    public void malformedImageField_fallsBackToDefaults() {
+        List<Account> out = AccountJsonCodec.fromJsonOrNull(
+                "[{\"id\":4,\"name\":\"n\",\"avatar\":\"mk\",\"hasImage\":\"yes\"}]");
+        assertEquals(1, out.size());
+        assertEquals("mk", out.get(0).avatar);
+        assertFalse(out.get(0).hasImage);
+        assertNull(out.get(0).shortcutToken);
     }
 }
