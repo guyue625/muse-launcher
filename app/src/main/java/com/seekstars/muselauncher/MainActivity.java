@@ -1,37 +1,50 @@
 package com.seekstars.muselauncher;
 
 import android.Manifest;
+import android.app.ActivityManager;
+import android.app.Dialog;
 import android.app.DownloadManager;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.SpannableString;
 import android.text.Spanned;
 import android.text.TextWatcher;
 import android.text.style.ForegroundColorSpan;
+import android.util.Base64;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.Gravity;
+import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.webkit.ConsoleMessage;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ValueCallback;
@@ -48,9 +61,12 @@ import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -59,6 +75,7 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.drawerlayout.widget.DrawerLayout;
 import androidx.webkit.Profile;
@@ -74,6 +91,13 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -134,10 +158,48 @@ public class MainActivity extends AppCompatActivity {
     private View btnBackToMuse;
     private ImageView iconBackToMuse;
     private TextView textBackToMuse;
+    private ProgressBar webLoadProgress;
+    private FrameLayout fullscreenVideoContainer;
+    private View customFullscreenView;
+    private WebChromeClient.CustomViewCallback customViewCallback;
+    private Dialog activeContextDialog;
+    private View downloadBanner;
+    private FrameLayout downloadBadge;
+    private ImageView downloadBadgeIcon;
+    private TextView textDownloadTitle;
+    private TextView textDownloadSaved;
+    private ProgressBar downloadProgressBar;
+    private TextView btnOpenDownload;
+    private View downloadDirCard;
+    private TextView downloadDirTitle;
+    private TextView downloadDirPath;
+    private TextView btnPickDownloadDir;
+    private TextView btnResetDownloadDir;
+    private View updateCard;
+    private TextView updateCardTitle;
+    private View updateBadgeDot;
+    private TextView updateVersionSub;
+    private TextView btnCheckUpdate;
+    private ActivityResultLauncher<Uri> pickDownloadDirLauncher;
+    private ActivityResultLauncher<Intent> installPermissionLauncher;
 
-    /** 每个账号一个独立 WebView（Profile 只能在 WebView 初始化前设置一次） */
-    private static final int MAX_ALIVE_WEBVIEWS = 4; // LRU：最多同时保留的账号页面数（含当前）
-    private final LruAccountRegistry<WebView> webViews = new LruAccountRegistry<>(MAX_ALIVE_WEBVIEWS);
+    private static final String UPDATE_DOWNLOAD_TOKEN = "__app_update__";
+    /** 闲置 30 秒自动回收下载工作线程，不下载时零后台线程常驻 */
+    private final ExecutorService downloadExecutor = new ThreadPoolExecutor(
+            0, 1, 30L, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
+    private final Map<String, WebDownloadSession> activeWebDownloads = new ConcurrentHashMap<>();
+    private String bannerDownloadToken;
+    private boolean bannerShowsApkReady;
+    private MediaDownloadHelper.SavedMedia lastSavedMedia;
+    private AppUpdateHelper.ReleaseInfo availableUpdate;
+    private boolean checkingUpdate;
+    private Dialog activeUpdateDialog;
+    private File pendingInstallApk;
+    private AtomicBoolean activeUpdateCancelFlag;
+    private final Runnable hideDownloadBannerRunnable = this::hideDownloadBannerAnimated;
+
+    /** 每个账号一个独立 WebView（Profile 只能在 WebView 初始化前设置一次）；按设备内存动态设定常驻上限 */
+    private LruAccountRegistry<WebView> webViews = new LruAccountRegistry<>(3);
     private final SparseArray<Boolean> webLoaded = new SparseArray<>();
     /** 主框架加载出错标记（错误遮罩依据），重试成功后清除 */
     private final SparseArray<Boolean> webErrored = new SparseArray<>();
@@ -146,6 +208,19 @@ public class MainActivity extends AppCompatActivity {
     /** 临时用于捕获 window.open / target="_blank" 的桥接 WebView，防止泄漏 */
     private final Set<WebView> transientPopups = new HashSet<>();
     private WebView currentWebView;
+    private Context cachedThemedContext;
+    private boolean timersPaused;
+    private boolean inBackground;
+    private boolean delayedEvictPending;
+    private long lastLoggedProbeAt;
+    private final Runnable delayedEvictRunnable = () -> {
+        delayedEvictPending = false;
+        if (inBackground && !isFinishing() && !isDestroyed()) {
+            AvatarStore.trimMemory();
+            AvatarTile.trimMemory();
+            evictInactiveWebViews();
+        }
+    };
 
     private long editId = -1;
     private long confirmDelId = -1;
@@ -197,6 +272,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         setContentView(R.layout.activity_main);
+        webViews = new LruAccountRegistry<>(resolveWebViewCapacity());
         checkStoreNotice();
         profileStore = ProfileStore.getInstance();
 
@@ -243,6 +319,87 @@ public class MainActivity extends AppCompatActivity {
         btnBackToMuse = findViewById(R.id.btnBackToMuse);
         iconBackToMuse = findViewById(R.id.iconBackToMuse);
         textBackToMuse = findViewById(R.id.textBackToMuse);
+        webLoadProgress = findViewById(R.id.webLoadProgress);
+        fullscreenVideoContainer = findViewById(R.id.fullscreenVideoContainer);
+        downloadBanner = findViewById(R.id.downloadBanner);
+        downloadBadge = findViewById(R.id.downloadBadge);
+        downloadBadgeIcon = findViewById(R.id.downloadBadgeIcon);
+        textDownloadTitle = findViewById(R.id.textDownloadTitle);
+        textDownloadSaved = findViewById(R.id.textDownloadSaved);
+        downloadProgressBar = findViewById(R.id.downloadProgressBar);
+        btnOpenDownload = findViewById(R.id.btnOpenDownload);
+        downloadDirCard = findViewById(R.id.downloadDirCard);
+        downloadDirTitle = findViewById(R.id.downloadDirTitle);
+        downloadDirPath = findViewById(R.id.downloadDirPath);
+        btnPickDownloadDir = findViewById(R.id.btnPickDownloadDir);
+        btnResetDownloadDir = findViewById(R.id.btnResetDownloadDir);
+        updateCard = findViewById(R.id.updateCard);
+        updateCardTitle = findViewById(R.id.updateCardTitle);
+        updateBadgeDot = findViewById(R.id.updateBadgeDot);
+        updateVersionSub = findViewById(R.id.updateVersionSub);
+        btnCheckUpdate = findViewById(R.id.btnCheckUpdate);
+        if (downloadBanner != null) {
+            downloadBanner.setOnClickListener(v -> {
+                if (bannerDownloadToken != null) return;
+                if (bannerShowsApkReady && pendingInstallApk != null && pendingInstallApk.exists()) {
+                    requestInstallApk(pendingInstallApk);
+                } else {
+                    openLastDownloadedMedia();
+                }
+            });
+        }
+        if (btnOpenDownload != null) {
+            btnOpenDownload.setOnClickListener(v -> {
+                if (bannerDownloadToken != null) {
+                    cancelActiveDownload(bannerDownloadToken);
+                } else if (bannerShowsApkReady && pendingInstallApk != null && pendingInstallApk.exists()) {
+                    requestInstallApk(pendingInstallApk);
+                } else {
+                    openLastDownloadedMedia();
+                }
+            });
+        }
+        // 启动时异步清理过期拍照缓存与旧版安装包，避免缓存目录膨胀
+        downloadExecutor.execute(() -> {
+            long now = System.currentTimeMillis();
+            ResourcePolicy.cleanupStaleCacheFiles(
+                    new File(getCacheDir(), "captures"), now, ResourcePolicy.CAPTURE_CACHE_MAX_AGE_MS);
+            ResourcePolicy.cleanupStaleCacheFiles(
+                    new File(getCacheDir(), "updates"), now, 0L);
+        });
+        pickDownloadDirLauncher = registerForActivityResult(
+                new ActivityResultContracts.OpenDocumentTree(), this::onDownloadDirPicked);
+        installPermissionLauncher = registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(), result -> {
+                    File apk = pendingInstallApk;
+                    if (apk != null && apk.exists() && getPackageManager().canRequestPackageInstalls()) {
+                        launchApkInstaller(apk);
+                    }
+                });
+        if (btnPickDownloadDir != null) {
+            btnPickDownloadDir.setOnClickListener(v -> openDownloadDirPicker());
+        }
+        if (btnResetDownloadDir != null) {
+            btnResetDownloadDir.setOnClickListener(v -> resetDownloadDir());
+        }
+        View.OnClickListener updateClickListener = v -> {
+            if (availableUpdate != null) {
+                showUpdateDialog(availableUpdate);
+            } else {
+                checkForUpdates(true);
+            }
+        };
+        if (btnCheckUpdate != null) btnCheckUpdate.setOnClickListener(updateClickListener);
+        if (updateCard != null) updateCard.setOnClickListener(updateClickListener);
+        refreshDownloadDirUi();
+        refreshUpdateCardUi();
+        // 冷启动满 24 小时延迟 3.5 秒静默检查一次更新，避免与首屏网页加载争抢带宽
+        mainHandler.postDelayed(() -> {
+            if (!isFinishing() && !isDestroyed() && store != null
+                    && AppUpdateHelper.shouldAutoCheck(store.getLastUpdateCheckAt(), System.currentTimeMillis())) {
+                checkForUpdates(false);
+            }
+        }, 3500L);
 
         btnRailExpand.setOnClickListener(v -> drawerLayout.openDrawer(drawerContent));
         btnCollapse.setOnClickListener(v -> drawerLayout.closeDrawer(drawerContent));
@@ -392,6 +549,25 @@ public class MainActivity extends AppCompatActivity {
                 openConfig(cfgId, cmd.proxyPreset, cmd.proxyAutoTest, cmd.proxySave);
             }
         }
+        if (launchIntent != null && launchIntent.getBooleanExtra("preview_update_dialog", false)) {
+            AppUpdateHelper.ReleaseInfo sample = new AppUpdateHelper.ReleaseInfo(
+                    "v1.4", "1.4", "Muse Launcher v1.4",
+                    "• 新增：应用内一键检查更新与代理下载安装\n• 新增：可配置自定义下载目录与悬浮实时进度卡\n• 新增：长按图片保存、顶部渐变加载条与视频真全屏\n• 优化：后台延迟回收与 R8 精简（安装包缩至 1.4 MB）",
+                    AppUpdateHelper.RELEASES_WEB_URL, "muse-launcher-v1.4.apk", 1450000L,
+                    AppUpdateHelper.RELEASES_WEB_URL);
+            availableUpdate = sample;
+            refreshUpdateCardUi();
+            mainHandler.postDelayed(() -> showUpdateDialog(sample), 300L);
+        }
+        if (launchIntent != null && launchIntent.getBooleanExtra("preview_context_menu", false)) {
+            mainHandler.postDelayed(() -> {
+                if (currentWebView != null) {
+                    showWebContextMenu(currentWebView, store.getCurrentId(),
+                            "https://cdn.muse.ai/assets/generated_poster_2026.png",
+                            "https://muse.ai/space/demo");
+                }
+            }, 300L);
+        }
         if (cmd.searchQuery != null) {
             searchInput.setText(cmd.searchQuery);
         }
@@ -448,14 +624,24 @@ public class MainActivity extends AppCompatActivity {
         return cfg;
     }
 
-    /** 基于当前日夜模式创建显式配置上下文，确保 uiMode 变化后颜色与 Drawable 立即准确解析 */
+    /** 基于当前日夜模式缓存显式配置上下文，避免每次 renderAccounts 重复分配 Context/Resources */
     private Context themedContext() {
-        return createConfigurationContext(nightModeConfiguration());
+        if (cachedThemedContext == null) {
+            cachedThemedContext = createConfigurationContext(nightModeConfiguration());
+        }
+        return cachedThemedContext;
+    }
+
+    @Override
+    public void onConfigurationChanged(@NonNull Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        cachedThemedContext = null;
     }
 
     private void setDarkTheme(boolean dark, boolean showToast) {
         if (darkTheme == dark) return;
         darkTheme = dark;
+        cachedThemedContext = null;
         store.setDarkTheme(dark);
         AppCompatDelegate.setDefaultNightMode(
                 dark ? AppCompatDelegate.MODE_NIGHT_YES : AppCompatDelegate.MODE_NIGHT_NO);
@@ -571,6 +757,42 @@ public class MainActivity extends AppCompatActivity {
         }
         if (iconBackToMuse != null) iconBackToMuse.setImageTintList(blueTint);
         if (textBackToMuse != null) textBackToMuse.setTextColor(fabText);
+        if (downloadBanner != null) {
+            downloadBanner.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_download_banner));
+        }
+        if (textDownloadTitle != null) textDownloadTitle.setTextColor(fabText);
+        if (textDownloadSaved != null) textDownloadSaved.setTextColor(textMuted);
+        if (downloadProgressBar != null) {
+            downloadProgressBar.setProgressDrawable(
+                    ContextCompat.getDrawable(tc, R.drawable.bg_download_progress));
+        }
+        int btnGrayText = ContextCompat.getColor(tc, R.color.btn_gray_text);
+        if (downloadBadge != null && downloadBadgeIcon != null) {
+            boolean active = bannerDownloadToken != null;
+            downloadBadge.setBackground(ContextCompat.getDrawable(tc,
+                    active ? R.drawable.bg_download_badge_active : R.drawable.bg_download_badge_done));
+            downloadBadgeIcon.setImageTintList(ColorStateList.valueOf(active ? blue : Color.WHITE));
+        }
+        if (btnOpenDownload != null) {
+            boolean active = bannerDownloadToken != null;
+            btnOpenDownload.setBackground(ContextCompat.getDrawable(tc,
+                    active ? R.drawable.bg_pill_btn_muted : R.drawable.bg_pill_btn_primary));
+            btnOpenDownload.setTextColor(active ? btnGrayText : Color.WHITE);
+        }
+        if (downloadDirCard != null) {
+            downloadDirCard.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_card));
+        }
+        if (downloadDirTitle != null) downloadDirTitle.setTextColor(textPrimary);
+        if (downloadDirPath != null) downloadDirPath.setTextColor(textMuted);
+        if (btnPickDownloadDir != null) {
+            btnPickDownloadDir.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_editbtn));
+            btnPickDownloadDir.setTextColor(btnGrayText);
+        }
+        if (btnResetDownloadDir != null) {
+            btnResetDownloadDir.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_editbtn));
+            btnResetDownloadDir.setTextColor(btnGrayText);
+        }
+        refreshUpdateCardUi();
 
         renderAccounts();
     }
@@ -592,11 +814,12 @@ public class MainActivity extends AppCompatActivity {
     private void syncThemeToAllWebViews() {
         Configuration cfg = nightModeConfiguration();
         int chatBg = ContextCompat.getColor(themedContext(), R.color.chat_bg);
-        for (Account a : store.all()) {
-            syncThemeCookie(a.id);
-        }
         String js = ThemeCookieHelper.buildDomThemeSyncScript(darkTheme);
-        for (WebView wv : webViews.snapshot().values()) {
+        // 仅同步当前存活 WebView 的 Cookie 与 DOM（休眠账号打开时会自动同步主题 Cookie，免主线程全量刷盘）
+        for (Map.Entry<Long, WebView> entry : webViews.snapshot().entrySet()) {
+            syncThemeCookie(entry.getKey());
+            WebView wv = entry.getValue();
+            if (wv == null) continue;
             wv.setBackgroundColor(chatBg);
             try {
                 wv.dispatchConfigurationChanged(cfg);
@@ -797,6 +1020,7 @@ public class MainActivity extends AppCompatActivity {
                 if (MuseUrlHelper.isMusePage(url)) {
                     view.evaluateJavascript(ThemeCookieHelper.buildDomThemeSyncScript(darkTheme), null);
                 }
+                view.evaluateJavascript(MediaDownloadHelper.buildRevokeObjectUrlGuardScript(), null);
                 if (a.id != store.getCurrentId()) return;
                 if (webErrored.get((int) a.id, false)) {
                     showErrorOverlay(null); // 错误页已渲染，保持遮罩等用户重试
@@ -807,7 +1031,9 @@ public class MainActivity extends AppCompatActivity {
                 long elapsed = SystemClock.uptimeMillis() - splashShownAt;
                 webContainer.postDelayed(hideSplashRunnable,
                         Math.max(0, MIN_SPLASH_MS - elapsed));
-                refreshLogged();
+                if (MuseUrlHelper.isMusePage(url)) {
+                    refreshLogged(false);
+                }
             }
 
             @Override
@@ -837,8 +1063,7 @@ public class MainActivity extends AppCompatActivity {
                 }
                 webViews.remove(crashedId != null ? crashedId : -1L);
                 if (crashedId != null) webLoaded.remove(crashedId.intValue());
-                webContainer.removeView(view);
-                view.destroy();
+                destroyWebView(view);
 
                 boolean wasCurrent = crashedId != null
                         && crashedId.longValue() == store.getCurrentId();
@@ -903,6 +1128,23 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
+            public void onProgressChanged(WebView view, int newProgress) {
+                if (a.id == store.getCurrentId()) {
+                    updatePageLoadProgress(newProgress);
+                }
+            }
+
+            @Override
+            public void onShowCustomView(View view, CustomViewCallback callback) {
+                enterCustomFullscreenVideo(view, callback);
+            }
+
+            @Override
+            public void onHideCustomView() {
+                exitCustomFullscreenVideo();
+            }
+
+            @Override
             public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
                 if (BuildConfig.DEBUG && consoleMessage != null) {
                     Log.d("MuseConsole", consoleMessage.messageLevel() + ": "
@@ -913,22 +1155,11 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        wv.setDownloadListener((url, userAgent, contentDisposition, mimeType, length) -> {
-            try {
-                DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
-                req.setNotificationVisibility(
-                        DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-                if (userAgent != null) req.addRequestHeader("User-Agent", userAgent);
-                DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
-                dm.enqueue(req);
-                toast(getString(R.string.toast_download_started));
-            } catch (Exception e) {
-                try {
-                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-                } catch (Exception ignored) {
-                }
-            }
-        });
+        wv.addJavascriptInterface(new MuseDownloadBridge(), "MuseDownload");
+        final WebView downloadWebView = wv;
+        wv.setDownloadListener((url, userAgent, contentDisposition, mimeType, length) ->
+                handleWebDownload(downloadWebView, a.id, url, userAgent, contentDisposition, mimeType));
+        wv.setOnLongClickListener(v -> handleWebLongClick(downloadWebView, a.id));
 
         // Profile 必须在任何页面加载前设置，且每个 WebView 只能设置一次
         try {
@@ -1262,15 +1493,26 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        inBackground = false;
+        cancelDelayedEviction();
+        resumeWebViewTimersIfNeeded();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         if (store == null || drawerLayout == null) return;
+        inBackground = false;
+        cancelDelayedEviction();
+        resumeWebViewTimersIfNeeded();
         if (currentWebView != null) currentWebView.onResume();
         // 元数据刷新不能依赖 Cookie 状态发生变化。
         store.reload();
         checkStoreNotice();
         renderAccounts();
-        refreshLogged();
+        refreshLogged(false);
         Account cur = store.findById(store.getCurrentId());
         ProxyHelper.apply(cur != null ? cur.proxy : "");
     }
@@ -1278,10 +1520,13 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         if (currentWebView != null) currentWebView.onPause();
+        // 只刷新存在存活 WebView 的账号 Cookie，避免遍历全部账号造成主线程无谓 IPC 与磁盘刷写
         try {
-            for (Account a : store.all()) {
-                Profile p = profileStore.getProfile(profileName(a.id));
-                if (p != null) p.getCookieManager().flush();
+            if (profileStore != null) {
+                for (Long aliveId : webViews.snapshot().keySet()) {
+                    Profile p = profileStore.getProfile(profileName(aliveId));
+                    if (p != null) p.getCookieManager().flush();
+                }
             }
         } catch (Exception ignored) {
         }
@@ -1289,7 +1534,144 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onStop() {
+        super.onStop();
+        inBackground = true;
+        if (!isChangingConfigurations()) {
+            scheduleDelayedEviction();
+        }
+        // 退到后台且无正在进行的语音通话/文件下载时暂停 WebView 定时器，显著降低后台 CPU 与耗电
+        if (currentWebView != null && !timersPaused
+                && activeWebDownloads.isEmpty() && !hasActiveAudioRecording()) {
+            try {
+                currentWebView.pauseTimers();
+                timersPaused = true;
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (ResourcePolicy.shouldTrimBitmapCache(level)) {
+            AvatarStore.trimMemory();
+            AvatarTile.trimMemory();
+        }
+        if (ResourcePolicy.shouldEvictInactiveWebViewsImmediately(level)) {
+            cancelDelayedEviction();
+            evictInactiveWebViews();
+        } else if (ResourcePolicy.shouldScheduleDelayedEviction(level)) {
+            scheduleDelayedEviction();
+        }
+    }
+
+    private void scheduleDelayedEviction() {
+        if (delayedEvictPending || isFinishing() || isDestroyed()) return;
+        if (webViews == null || webViews.size() <= 1) return;
+        delayedEvictPending = true;
+        mainHandler.postDelayed(delayedEvictRunnable, ResourcePolicy.BACKGROUND_EVICT_DELAY_MS);
+        Log.i("MuseWebview", "scheduled delayed eviction in "
+                + (ResourcePolicy.BACKGROUND_EVICT_DELAY_MS / 1000L) + "s");
+    }
+
+    private void cancelDelayedEviction() {
+        if (delayedEvictPending) {
+            mainHandler.removeCallbacks(delayedEvictRunnable);
+            delayedEvictPending = false;
+        }
+    }
+
+    private void resumeWebViewTimersIfNeeded() {
+        if (timersPaused && currentWebView != null) {
+            try {
+                currentWebView.resumeTimers();
+            } catch (Exception ignored) {
+            }
+            timersPaused = false;
+        }
+    }
+
+    private boolean hasActiveAudioRecording() {
+        try {
+            AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+            return am != null && !am.getActiveRecordingConfigurations().isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private int resolveWebViewCapacity() {
+        try {
+            ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+            if (am != null) {
+                ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mi);
+                return ResourcePolicy.recommendedWebViewCapacity(mi.totalMem, am.isLowRamDevice());
+            }
+        } catch (Exception ignored) {
+        }
+        return 2;
+    }
+
+    /** 回收全部隐藏态非当前 WebView（保留当前账号页与所有账号的 Profile 登录数据），立即释放渲染进程内存 */
+    private void evictInactiveWebViews() {
+        if (webViews == null) return;
+        int evicted = 0;
+        for (Map.Entry<Long, WebView> entry : webViews.snapshot().entrySet()) {
+            WebView wv = entry.getValue();
+            if (wv == null || wv == currentWebView) continue;
+            long id = entry.getKey();
+            WebView removed = webViews.remove(id);
+            if (removed != null) {
+                webLoaded.remove((int) id);
+                destroyWebView(removed);
+                evicted++;
+            }
+        }
+        if (evicted > 0) {
+            Log.i("MuseWebview", "trim evicted inactive count=" + evicted);
+        }
+    }
+
+    private void destroyWebView(WebView view) {
+        if (view == null) return;
+        try {
+            view.stopLoading();
+            view.removeJavascriptInterface("MuseDownload");
+            view.setWebChromeClient(null);
+            view.setWebViewClient(new WebViewClient());
+            view.setDownloadListener(null);
+            view.setOnLongClickListener(null);
+            if (webContainer != null) webContainer.removeView(view);
+            view.loadUrl("about:blank");
+            view.removeAllViews();
+            view.destroy();
+        } catch (Exception ignored) {
+        }
+    }
+
+    @Override
     protected void onDestroy() {
+        exitCustomFullscreenVideo();
+        if (activeContextDialog != null) {
+            try {
+                activeContextDialog.dismiss();
+            } catch (Exception ignored) {
+            }
+            activeContextDialog = null;
+        }
+        if (activeUpdateDialog != null) {
+            try {
+                activeUpdateDialog.dismiss();
+            } catch (Exception ignored) {
+            }
+            activeUpdateDialog = null;
+        }
+        if (activeUpdateCancelFlag != null) {
+            activeUpdateCancelFlag.set(true);
+            activeUpdateCancelFlag = null;
+        }
         mainHandler.removeCallbacksAndMessages(null);
         if (webContainer != null) webContainer.removeCallbacks(hideSplashRunnable);
         probeQueue = null;
@@ -1298,10 +1680,7 @@ public class MainActivity extends AppCompatActivity {
         }
         for (Map.Entry<Long, WebView> entry : webViews.snapshot().entrySet()) {
             WebView view = webViews.remove(entry.getKey());
-            if (view != null) {
-                if (webContainer != null) webContainer.removeView(view);
-                view.destroy();
-            }
+            destroyWebView(view);
         }
         currentWebView = null;
         if (fileCallback != null) {
@@ -1317,12 +1696,1184 @@ public class MainActivity extends AppCompatActivity {
             pendingPermissionRequest = null;
             pendingPermissionResources = null;
         }
+        for (WebDownloadSession session : activeWebDownloads.values()) {
+            if (session.pending != null) session.pending.abort();
+        }
+        activeWebDownloads.clear();
+        downloadExecutor.shutdownNow();
         super.onDestroy();
+    }
+
+    // ---------- 下载目录配置 + 媒体与文件下载 ----------
+
+    private void openDownloadDirPicker() {
+        if (pickDownloadDirLauncher == null) return;
+        try {
+            String current = store != null ? store.getDownloadTreeUri() : "";
+            Uri initial = (current != null && !current.isEmpty()) ? Uri.parse(current) : null;
+            pickDownloadDirLauncher.launch(initial);
+        } catch (Exception e) {
+            toast(getString(R.string.toast_download_dir_pick_failed));
+        }
+    }
+
+    private void onDownloadDirPicked(Uri treeUri) {
+        if (treeUri == null || store == null) return;
+        int flags = Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+        try {
+            getContentResolver().takePersistableUriPermission(treeUri, flags);
+        } catch (Exception ignored) {
+        }
+        String old = store.getDownloadTreeUri();
+        String next = treeUri.toString();
+        if (old != null && !old.isEmpty() && !old.equals(next)) {
+            try {
+                getContentResolver().releasePersistableUriPermission(Uri.parse(old), flags);
+            } catch (Exception ignored) {
+            }
+        }
+        store.setDownloadTreeUri(next);
+        refreshDownloadDirUi();
+        toast(getString(R.string.toast_download_dir_set,
+                MediaDownloadHelper.formatTreeUriDisplay(next)));
+    }
+
+    private void resetDownloadDir() {
+        if (store == null) return;
+        String old = store.getDownloadTreeUri();
+        if (old != null && !old.isEmpty()) {
+            try {
+                getContentResolver().releasePersistableUriPermission(
+                        Uri.parse(old),
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            } catch (Exception ignored) {
+            }
+        }
+        store.setDownloadTreeUri("");
+        refreshDownloadDirUi();
+        toast(getString(R.string.toast_download_dir_reset));
+    }
+
+    private void refreshDownloadDirUi() {
+        if (downloadDirPath == null || store == null) return;
+        String custom = store.getDownloadTreeUri();
+        boolean hasCustom = custom != null && !custom.isEmpty();
+        downloadDirPath.setText(hasCustom
+                ? MediaDownloadHelper.formatTreeUriDisplay(custom)
+                : getString(R.string.drawer_download_dir_default));
+        if (btnResetDownloadDir != null) {
+            btnResetDownloadDir.setVisibility(hasCustom ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private static final class WebDownloadSession {
+        final String token;
+        final long accountId;
+        final String url;
+        final String userAgent;
+        final String referer;
+        final String contentDisposition;
+        final String mimeType;
+        final CookieManager cookieManager;
+        final String proxy;
+        final String customTreeUri;
+        volatile String displayName;
+        volatile boolean cancelled;
+        volatile long downloadedBytes;
+        volatile long totalBytes;
+        volatile long lastProgressUiAt;
+        MediaDownloadHelper.PendingMedia pending;
+
+        WebDownloadSession(String token, long accountId, String url, String userAgent, String referer,
+                           String contentDisposition, String mimeType,
+                           CookieManager cookieManager, String proxy, String customTreeUri,
+                           String displayName) {
+            this.token = token;
+            this.accountId = accountId;
+            this.url = url;
+            this.userAgent = userAgent;
+            this.referer = referer;
+            this.contentDisposition = contentDisposition;
+            this.mimeType = mimeType;
+            this.cookieManager = cookieManager;
+            this.proxy = proxy;
+            this.customTreeUri = customTreeUri;
+            this.displayName = displayName;
+        }
+    }
+
+    private void handleWebDownload(WebView view, long accountId, String url,
+                                   String userAgent, String contentDisposition, String mimeType) {
+        if (url == null || url.trim().isEmpty()) return;
+        final String customTreeUri = store != null ? store.getDownloadTreeUri() : "";
+        MediaDownloadHelper.Destination preview = MediaDownloadHelper.resolveDestination(
+                url, contentDisposition, mimeType, null);
+
+        // 1. data: URL 直接本地解码写入（优先用户配置目录，未配置走默认 MediaStore）
+        if (url.regionMatches(true, 0, "data:", 0, 5)) {
+            showDownloadProgressBanner(null, preview.fileName, 0L, 0L);
+            downloadExecutor.execute(() -> {
+                MediaDownloadHelper.PendingMedia pending = null;
+                try {
+                    MediaDownloadHelper.DataUrlPayload payload = MediaDownloadHelper.parseDataUrl(url);
+                    if (payload == null || payload.bytes.length == 0) {
+                        throw new IOException("Invalid data URL");
+                    }
+                    MediaDownloadHelper.Destination dest = MediaDownloadHelper.resolveDestination(
+                            url, contentDisposition, payload.mimeType, null);
+                    pending = MediaDownloadHelper.openPendingDownload(
+                            getApplicationContext(), dest, customTreeUri);
+                    pending.out.write(payload.bytes);
+                    MediaDownloadHelper.SavedMedia saved = pending.commit();
+                    runOnUiThread(() -> showDownloadSavedBanner(saved));
+                } catch (Exception e) {
+                    if (pending != null) pending.abort();
+                    Log.w("MuseDownload", "data download failed: " + e.getMessage());
+                    runOnUiThread(() -> {
+                        hideDownloadBannerAnimated();
+                        toast(getString(R.string.toast_download_failed));
+                    });
+                }
+            });
+            return;
+        }
+
+        // 在主线程提取该账号的 Profile CookieManager 与代理（androidx ProfileStore 要求主线程访问）
+        CookieManager accountCookies = null;
+        String accountProxy = "";
+        try {
+            Profile p = profileStore != null ? profileStore.getProfile(profileName(accountId)) : null;
+            if (p != null) accountCookies = p.getCookieManager();
+            Account acct = store != null ? store.findById(accountId) : null;
+            if (acct != null && acct.proxy != null) accountProxy = acct.proxy;
+        } catch (Exception ignored) {
+        }
+
+        // 2. blob: 与 http(s): 优先在当前 WebView 内流式 fetch（复用账号独立 Profile Cookie 与代理）
+        //    若 http(s): 遇跨域 CORS 失败，onFetchFailed 会自动无缝回退原生流式下载或公共 DownloadManager
+        String token = UUID.randomUUID().toString();
+        String referer = view != null ? view.getUrl() : START_URL;
+        WebDownloadSession session = new WebDownloadSession(
+                token, accountId, url, userAgent, referer, contentDisposition, mimeType,
+                accountCookies, accountProxy, customTreeUri, preview.fileName);
+        activeWebDownloads.put(token, session);
+        showDownloadProgressBanner(token, preview.fileName, 0L, 0L);
+        if (view != null) {
+            view.evaluateJavascript(MediaDownloadHelper.buildWebFetchDownloadScript(token, url), null);
+        } else {
+            fallbackNativeDownload(session);
+        }
+    }
+
+    private void notifyDownloadProgressThrottled(WebDownloadSession session, boolean force) {
+        if (session == null || session.cancelled) return;
+        long now = SystemClock.uptimeMillis();
+        if (!force && (now - session.lastProgressUiAt) < 150L) return;
+        session.lastProgressUiAt = now;
+        final String token = session.token;
+        final String name = session.displayName;
+        final long done = session.downloadedBytes;
+        final long total = session.totalBytes;
+        runOnUiThread(() -> {
+            if (!session.cancelled && token.equals(bannerDownloadToken)) {
+                showDownloadProgressBanner(token, name, done, total);
+            }
+        });
+    }
+
+    private void cancelActiveDownload(String token) {
+        if (token == null) return;
+        if (UPDATE_DOWNLOAD_TOKEN.equals(token)) {
+            if (activeUpdateCancelFlag != null) {
+                activeUpdateCancelFlag.set(true);
+                activeUpdateCancelFlag = null;
+            }
+            if (token.equals(bannerDownloadToken)) {
+                bannerDownloadToken = null;
+                bannerShowsApkReady = false;
+                hideDownloadBannerAnimated();
+            }
+            toast(getString(R.string.toast_download_cancelled));
+            return;
+        }
+        WebDownloadSession session = activeWebDownloads.remove(token);
+        if (session != null) {
+            session.cancelled = true;
+            downloadExecutor.execute(() -> {
+                if (session.pending != null) {
+                    session.pending.abort();
+                    session.pending = null;
+                }
+            });
+        }
+        if (token.equals(bannerDownloadToken)) {
+            bannerDownloadToken = null;
+            bannerShowsApkReady = false;
+            hideDownloadBannerAnimated();
+        }
+        toast(getString(R.string.toast_download_cancelled));
+    }
+
+    private final class MuseDownloadBridge {
+        @JavascriptInterface
+        public boolean isCancelled(String token) {
+            WebDownloadSession session = activeWebDownloads.get(token);
+            return session == null || session.cancelled;
+        }
+
+        @JavascriptInterface
+        public void onBegin(String token, String contentType, String contentDisposition, long length) {
+            WebDownloadSession session = activeWebDownloads.get(token);
+            if (session == null || session.cancelled) return;
+            session.totalBytes = Math.max(0L, length);
+            downloadExecutor.execute(() -> {
+                if (session.cancelled || !activeWebDownloads.containsKey(token)) return;
+                try {
+                    String cd = (contentDisposition != null && !contentDisposition.isEmpty())
+                            ? contentDisposition : session.contentDisposition;
+                    String mime = (contentType != null && !contentType.isEmpty())
+                            ? contentType : session.mimeType;
+                    MediaDownloadHelper.Destination dest = MediaDownloadHelper.resolveDestination(
+                            session.url, cd, mime, null);
+                    session.displayName = dest.fileName;
+                    session.pending = MediaDownloadHelper.openPendingDownload(
+                            getApplicationContext(), dest, session.customTreeUri);
+                    notifyDownloadProgressThrottled(session, true);
+                } catch (Exception e) {
+                    activeWebDownloads.remove(token);
+                    Log.w("MuseDownload", "openPendingDownload failed: " + e.getMessage());
+                    runOnUiThread(() -> {
+                        if (token.equals(bannerDownloadToken)) {
+                            bannerDownloadToken = null;
+                            hideDownloadBannerAnimated();
+                        }
+                        toast(getString(R.string.toast_download_failed));
+                    });
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void onChunk(String token, String base64Chunk) {
+            WebDownloadSession session = activeWebDownloads.get(token);
+            if (session == null || session.cancelled || base64Chunk == null) return;
+            downloadExecutor.execute(() -> {
+                if (session.cancelled || session.pending == null) return;
+                try {
+                    byte[] bytes = Base64.decode(base64Chunk, Base64.DEFAULT);
+                    session.pending.out.write(bytes);
+                    session.downloadedBytes += bytes.length;
+                    notifyDownloadProgressThrottled(session, false);
+                } catch (Exception e) {
+                    session.pending.abort();
+                    session.pending = null;
+                    activeWebDownloads.remove(token);
+                    Log.w("MuseDownload", "write chunk failed: " + e.getMessage());
+                    runOnUiThread(() -> {
+                        if (token.equals(bannerDownloadToken)) {
+                            bannerDownloadToken = null;
+                            hideDownloadBannerAnimated();
+                        }
+                        toast(getString(R.string.toast_download_failed));
+                    });
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void onEnd(String token) {
+            WebDownloadSession session = activeWebDownloads.remove(token);
+            if (session == null || session.cancelled) return;
+            downloadExecutor.execute(() -> {
+                if (session.cancelled) {
+                    if (session.pending != null) {
+                        session.pending.abort();
+                        session.pending = null;
+                    }
+                    return;
+                }
+                if (session.pending == null) return;
+                try {
+                    MediaDownloadHelper.SavedMedia saved = session.pending.commit();
+                    session.pending = null;
+                    runOnUiThread(() -> showDownloadSavedBanner(saved));
+                } catch (Exception e) {
+                    session.pending.abort();
+                    session.pending = null;
+                    Log.w("MuseDownload", "commit failed: " + e.getMessage());
+                    runOnUiThread(() -> {
+                        if (token.equals(bannerDownloadToken)) {
+                            bannerDownloadToken = null;
+                            hideDownloadBannerAnimated();
+                        }
+                        toast(getString(R.string.toast_download_failed));
+                    });
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void onFetchFailed(String token, String reason) {
+            WebDownloadSession session = activeWebDownloads.get(token);
+            if (session == null || session.cancelled) {
+                activeWebDownloads.remove(token);
+                return;
+            }
+            downloadExecutor.execute(() -> {
+                if (session.pending != null) {
+                    session.pending.abort();
+                    session.pending = null;
+                }
+                if (session.cancelled) {
+                    activeWebDownloads.remove(token);
+                    return;
+                }
+                if (session.url.regionMatches(true, 0, "http://", 0, 7)
+                        || session.url.regionMatches(true, 0, "https://", 0, 8)) {
+                    Log.i("MuseDownload", "web fetch failed (" + reason + "), fallback to native HTTP");
+                    fallbackNativeDownload(session);
+                } else {
+                    activeWebDownloads.remove(token);
+                    Log.w("MuseDownload", "blob fetch failed: " + reason);
+                    runOnUiThread(() -> {
+                        if (token.equals(bannerDownloadToken)) {
+                            bannerDownloadToken = null;
+                            hideDownloadBannerAnimated();
+                        }
+                        toast(getString(R.string.toast_download_failed));
+                    });
+                }
+            });
+        }
+    }
+
+    /** 兜底路径：先原生带代理+Cookie 流式写入 MediaStore，失败再回退系统 DownloadManager（公共 Download/Muse/） */
+    private void fallbackNativeDownload(WebDownloadSession session) {
+        downloadExecutor.execute(() -> {
+            if (session.cancelled) {
+                activeWebDownloads.remove(session.token);
+                return;
+            }
+            session.downloadedBytes = 0L;
+            session.totalBytes = 0L;
+            try {
+                MediaDownloadHelper.SavedMedia saved = MediaDownloadHelper.downloadHttpToMediaStore(
+                        getApplicationContext(),
+                        session.url,
+                        session.userAgent,
+                        session.referer,
+                        session.contentDisposition,
+                        session.mimeType,
+                        session.cookieManager,
+                        session.proxy,
+                        session.customTreeUri,
+                        new MediaDownloadHelper.DownloadProgressListener() {
+                            @Override
+                            public void onProgress(long downloadedBytes, long totalBytes) {
+                                session.downloadedBytes = downloadedBytes;
+                                session.totalBytes = Math.max(0L, totalBytes);
+                                notifyDownloadProgressThrottled(session, downloadedBytes == 0L);
+                            }
+
+                            @Override
+                            public boolean isCancelled() {
+                                return session.cancelled;
+                            }
+                        });
+                activeWebDownloads.remove(session.token);
+                runOnUiThread(() -> showDownloadSavedBanner(saved));
+                return;
+            } catch (MediaDownloadHelper.DownloadCancelledException cancelled) {
+                activeWebDownloads.remove(session.token);
+                return;
+            } catch (Exception nativeErr) {
+                Log.w("MuseDownload", "native HTTP fallback failed: " + nativeErr.getMessage());
+            }
+
+            activeWebDownloads.remove(session.token);
+            if (session.cancelled) return;
+            // 最终兜底：系统 DownloadManager 明确落盘到公共 Download/Muse/（绝不进私有隐藏缓存）
+            runOnUiThread(() -> {
+                if (session.token.equals(bannerDownloadToken)) {
+                    bannerDownloadToken = null;
+                    hideDownloadBannerAnimated();
+                }
+                enqueuePublicDownloadManager(session, session.cookieManager);
+            });
+        });
+    }
+
+    private void enqueuePublicDownloadManager(WebDownloadSession session, CookieManager cm) {
+        try {
+            MediaDownloadHelper.Destination dest = MediaDownloadHelper.resolveDestination(
+                    session.url, session.contentDisposition, session.mimeType, null);
+            DownloadManager.Request req = new DownloadManager.Request(Uri.parse(session.url));
+            req.setTitle(dest.fileName);
+            req.setDescription("Download/Muse/" + dest.fileName);
+            req.setMimeType(dest.mimeType);
+            req.setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            req.setDestinationInExternalPublicDir(
+                    Environment.DIRECTORY_DOWNLOADS, "Muse/" + dest.fileName);
+            if (session.userAgent != null && !session.userAgent.isEmpty()) {
+                req.addRequestHeader("User-Agent", session.userAgent);
+            }
+            if (session.referer != null && !session.referer.isEmpty()) {
+                req.addRequestHeader("Referer", session.referer);
+            }
+            if (cm != null) {
+                String cookies = cm.getCookie(session.url);
+                if (cookies != null && !cookies.isEmpty()) {
+                    req.addRequestHeader("Cookie", cookies);
+                }
+            }
+            DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+            dm.enqueue(req);
+            toast(getString(R.string.toast_download_fallback_dm, dest.fileName));
+        } catch (Exception e) {
+            Log.w("MuseDownload", "DownloadManager fallback failed: " + e.getMessage());
+            toast(getString(R.string.toast_download_failed));
+        }
+    }
+
+    private void showDownloadProgressBanner(String token, String fileName,
+                                            long downloadedBytes, long totalBytes) {
+        if (isFinishing() || isDestroyed() || downloadBanner == null) return;
+        mainHandler.removeCallbacks(hideDownloadBannerRunnable);
+        bannerDownloadToken = token;
+        bannerShowsApkReady = false;
+        Context tc = themedContext();
+        int blue = ContextCompat.getColor(tc, R.color.blue);
+        int btnGrayText = ContextCompat.getColor(tc, R.color.btn_gray_text);
+
+        if (downloadBadge != null && downloadBadgeIcon != null) {
+            downloadBadge.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_download_badge_active));
+            downloadBadgeIcon.setImageResource(R.drawable.ic_download);
+            downloadBadgeIcon.setImageTintList(ColorStateList.valueOf(blue));
+        }
+        String title;
+        if (totalBytes > 0) {
+            title = getString(R.string.download_title_active_ratio,
+                    MediaDownloadHelper.formatBytes(downloadedBytes),
+                    MediaDownloadHelper.formatBytes(totalBytes));
+        } else if (downloadedBytes > 0) {
+            title = getString(R.string.download_title_active_bytes,
+                    MediaDownloadHelper.formatBytes(downloadedBytes));
+        } else {
+            title = getString(R.string.download_title_active);
+        }
+        if (textDownloadTitle != null) textDownloadTitle.setText(title);
+        if (textDownloadSaved != null) {
+            textDownloadSaved.setText(fileName != null ? fileName : "");
+        }
+        if (downloadProgressBar != null) {
+            downloadProgressBar.setVisibility(View.VISIBLE);
+            int pct = MediaDownloadHelper.computeProgressPercent(downloadedBytes, totalBytes);
+            if (pct >= 0) {
+                downloadProgressBar.setIndeterminate(false);
+                downloadProgressBar.setProgress(pct, true);
+            } else {
+                downloadProgressBar.setIndeterminate(true);
+            }
+        }
+        if (btnOpenDownload != null) {
+            if (token != null) {
+                btnOpenDownload.setVisibility(View.VISIBLE);
+                btnOpenDownload.setText(R.string.btn_cancel);
+                btnOpenDownload.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_pill_btn_muted));
+                btnOpenDownload.setTextColor(btnGrayText);
+            } else {
+                btnOpenDownload.setVisibility(View.GONE);
+            }
+        }
+        revealDownloadBannerAnimated();
+    }
+
+    private void showDownloadSavedBanner(MediaDownloadHelper.SavedMedia saved) {
+        if (isFinishing() || isDestroyed() || saved == null) return;
+        bannerDownloadToken = null;
+        bannerShowsApkReady = false;
+        lastSavedMedia = saved;
+        Context tc = themedContext();
+        String title;
+        if (saved.customDirFallback) {
+            title = getString(R.string.download_title_custom_fallback);
+        } else if (!saved.usedCustomDir && (saved.destination.category == MediaDownloadHelper.Category.IMAGE
+                || saved.destination.category == MediaDownloadHelper.Category.VIDEO)) {
+            title = getString(R.string.download_title_saved_gallery);
+        } else {
+            title = getString(R.string.download_title_saved_file);
+        }
+        String subtitle = saved.destination.relativePath + "/" + saved.destination.fileName;
+
+        if (downloadBanner != null && textDownloadSaved != null) {
+            if (downloadBadge != null && downloadBadgeIcon != null) {
+                downloadBadge.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_download_badge_done));
+                downloadBadgeIcon.setImageResource(R.drawable.ic_check);
+                downloadBadgeIcon.setImageTintList(ColorStateList.valueOf(Color.WHITE));
+            }
+            if (textDownloadTitle != null) textDownloadTitle.setText(title);
+            textDownloadSaved.setText(subtitle);
+            if (downloadProgressBar != null) {
+                downloadProgressBar.setIndeterminate(false);
+                downloadProgressBar.setVisibility(View.GONE);
+            }
+            if (btnOpenDownload != null) {
+                btnOpenDownload.setVisibility(View.VISIBLE);
+                btnOpenDownload.setText(R.string.btn_open_download);
+                btnOpenDownload.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_pill_btn_primary));
+                btnOpenDownload.setTextColor(Color.WHITE);
+            }
+            revealDownloadBannerAnimated();
+            mainHandler.removeCallbacks(hideDownloadBannerRunnable);
+            mainHandler.postDelayed(hideDownloadBannerRunnable, 6000);
+        } else {
+            Toast.makeText(this, title + " · " + subtitle, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void revealDownloadBannerAnimated() {
+        if (downloadBanner == null) return;
+        downloadBanner.animate().cancel();
+        if (downloadBanner.getVisibility() != View.VISIBLE) {
+            downloadBanner.setAlpha(0f);
+            downloadBanner.setTranslationY(-dp(10));
+            downloadBanner.setVisibility(View.VISIBLE);
+            downloadBanner.animate()
+                    .alpha(1f)
+                    .translationY(0f)
+                    .setDuration(180)
+                    .start();
+        } else {
+            downloadBanner.setAlpha(1f);
+            downloadBanner.setTranslationY(0f);
+        }
+    }
+
+    private void hideDownloadBannerAnimated() {
+        if (downloadBanner == null || downloadBanner.getVisibility() != View.VISIBLE) return;
+        downloadBanner.animate().cancel();
+        downloadBanner.animate()
+                .alpha(0f)
+                .translationY(-dp(10))
+                .setDuration(160)
+                .withEndAction(() -> {
+                    if (downloadBanner != null) {
+                        downloadBanner.setVisibility(View.GONE);
+                        downloadBanner.setAlpha(1f);
+                        downloadBanner.setTranslationY(0f);
+                    }
+                })
+                .start();
+    }
+
+    private void openLastDownloadedMedia() {
+        MediaDownloadHelper.SavedMedia saved = lastSavedMedia;
+        if (saved == null) return;
+        mainHandler.removeCallbacks(hideDownloadBannerRunnable);
+        hideDownloadBannerAnimated();
+        try {
+            Intent viewIntent = new Intent(Intent.ACTION_VIEW);
+            viewIntent.setDataAndType(saved.uri, saved.destination.mimeType);
+            viewIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(viewIntent);
+        } catch (Exception e) {
+            toast(getString(R.string.toast_cannot_open_file, saved.destination.relativePath));
+        }
+    }
+
+    // ---------- 顶部加载进度条 / 视频真全屏 / 长按图片与链接操作面板 ----------
+
+    private void updatePageLoadProgress(int progress) {
+        if (webLoadProgress == null) return;
+        if (progress <= 0 || progress >= 100) {
+            if (webLoadProgress.getVisibility() == View.VISIBLE) {
+                webLoadProgress.setProgress(100, true);
+                webLoadProgress.animate().cancel();
+                webLoadProgress.animate()
+                        .alpha(0f)
+                        .setDuration(200)
+                        .withEndAction(() -> {
+                            if (webLoadProgress != null) {
+                                webLoadProgress.setVisibility(View.GONE);
+                                webLoadProgress.setProgress(0);
+                                webLoadProgress.setAlpha(1f);
+                            }
+                        })
+                        .start();
+            }
+            return;
+        }
+        webLoadProgress.animate().cancel();
+        webLoadProgress.setAlpha(1f);
+        if (webLoadProgress.getVisibility() != View.VISIBLE) {
+            webLoadProgress.setVisibility(View.VISIBLE);
+        }
+        webLoadProgress.setProgress(Math.max(8, progress), true);
+    }
+
+    private void resetPageLoadProgress() {
+        if (webLoadProgress == null) return;
+        webLoadProgress.animate().cancel();
+        webLoadProgress.setVisibility(View.GONE);
+        webLoadProgress.setProgress(0);
+        webLoadProgress.setAlpha(1f);
+    }
+
+    private void enterCustomFullscreenVideo(View view, WebChromeClient.CustomViewCallback callback) {
+        if (view == null || fullscreenVideoContainer == null) {
+            if (callback != null) callback.onCustomViewHidden();
+            return;
+        }
+        if (customFullscreenView != null) {
+            if (callback != null) callback.onCustomViewHidden();
+            return;
+        }
+        customFullscreenView = view;
+        customViewCallback = callback;
+        fullscreenVideoContainer.removeAllViews();
+        fullscreenVideoContainer.addView(view, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        fullscreenVideoContainer.setVisibility(View.VISIBLE);
+        fullscreenVideoContainer.setKeepScreenOn(true);
+        setSystemBarsVisible(false);
+    }
+
+    private void exitCustomFullscreenVideo() {
+        if (customFullscreenView == null) return;
+        View view = customFullscreenView;
+        WebChromeClient.CustomViewCallback cb = customViewCallback;
+        customFullscreenView = null;
+        customViewCallback = null;
+        if (fullscreenVideoContainer != null) {
+            fullscreenVideoContainer.removeView(view);
+            fullscreenVideoContainer.setVisibility(View.GONE);
+            fullscreenVideoContainer.setKeepScreenOn(false);
+        }
+        setSystemBarsVisible(true);
+        if (cb != null) {
+            try {
+                cb.onCustomViewHidden();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void setSystemBarsVisible(boolean visible) {
+        Window window = getWindow();
+        if (window == null) return;
+        WindowInsetsControllerCompat controller =
+                WindowCompat.getInsetsController(window, window.getDecorView());
+        if (controller == null) return;
+        if (visible) {
+            controller.show(WindowInsetsCompat.Type.systemBars());
+        } else {
+            controller.setSystemBarsBehavior(
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            controller.hide(WindowInsetsCompat.Type.systemBars());
+        }
+    }
+
+    private boolean handleWebLongClick(WebView view, long accountId) {
+        if (view == null || isFinishing() || isDestroyed()) return false;
+        WebView.HitTestResult hit = view.getHitTestResult();
+        if (hit == null) return false;
+        int type = hit.getType();
+        String extra = hit.getExtra();
+        if (type == WebView.HitTestResult.IMAGE_TYPE) {
+            if (extra == null || extra.trim().isEmpty()) return false;
+            showWebContextMenu(view, accountId, extra.trim(), null);
+            return true;
+        }
+        if (type == WebView.HitTestResult.SRC_ANCHOR_TYPE) {
+            if (extra == null || extra.trim().isEmpty()) return false;
+            showWebContextMenu(view, accountId, null, extra.trim());
+            return true;
+        }
+        if (type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) {
+            final String fallbackImg = extra != null ? extra.trim() : null;
+            Message msg = Message.obtain(new Handler(Looper.getMainLooper()) {
+                @Override
+                public void handleMessage(@NonNull Message m) {
+                    Bundle data = m.getData();
+                    String href = data != null ? data.getString("url") : null;
+                    String src = data != null ? data.getString("src") : null;
+                    String imgUrl = (src != null && !src.trim().isEmpty()) ? src.trim() : fallbackImg;
+                    String linkUrl = (href != null && !href.trim().isEmpty()) ? href.trim() : null;
+                    if (imgUrl != null || linkUrl != null) {
+                        showWebContextMenu(view, accountId, imgUrl, linkUrl);
+                    }
+                }
+            });
+            view.requestFocusNodeHref(msg);
+            return true;
+        }
+        return false;
+    }
+
+    private void showWebContextMenu(WebView view, long accountId, String imageUrl, String linkUrl) {
+        if (isFinishing() || isDestroyed()) return;
+        if (activeContextDialog != null) {
+            try {
+                activeContextDialog.dismiss();
+            } catch (Exception ignored) {
+            }
+            activeContextDialog = null;
+        }
+        Context tc = themedContext();
+        View content = LayoutInflater.from(tc).inflate(R.layout.dialog_web_context_menu, null);
+        TextView badge = content.findViewById(R.id.sheetBadge);
+        TextView subtitle = content.findViewById(R.id.sheetSubtitle);
+        LinearLayout actionsCard = content.findViewById(R.id.sheetActionsCard);
+        TextView cancelBtn = content.findViewById(R.id.sheetCancel);
+
+        boolean hasImage = imageUrl != null && !imageUrl.isEmpty();
+        boolean hasLink = linkUrl != null && !linkUrl.isEmpty();
+        badge.setText(hasImage ? R.string.sheet_badge_image : R.string.sheet_badge_link);
+        String previewUrl = hasImage ? imageUrl : linkUrl;
+        if (previewUrl != null && previewUrl.regionMatches(true, 0, "data:", 0, 5)) {
+            subtitle.setText("data:image/...");
+        } else {
+            subtitle.setText(previewUrl != null ? previewUrl : "");
+        }
+
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setContentView(content);
+        dialog.setCanceledOnTouchOutside(true);
+
+        int blue = ContextCompat.getColor(tc, R.color.blue);
+        int iconColor = ContextCompat.getColor(tc, R.color.icon_primary);
+        int textColor = ContextCompat.getColor(tc, R.color.text_primary);
+        int lineColor = ContextCompat.getColor(tc, R.color.line);
+
+        List<View> rows = new ArrayList<>();
+        if (hasImage) {
+            rows.add(makeSheetActionRow(tc, R.drawable.ic_download, blue,
+                    getString(R.string.sheet_action_save_image), textColor, true, v -> {
+                        dialog.dismiss();
+                        String ua = view.getSettings() != null ? view.getSettings().getUserAgentString() : null;
+                        handleWebDownload(view, accountId, imageUrl, ua, null, "image/*");
+                    }));
+            rows.add(makeSheetActionRow(tc, R.drawable.ic_copy, iconColor,
+                    getString(R.string.sheet_action_copy_image_url), textColor, false, v -> {
+                        dialog.dismiss();
+                        copyTextToClipboard(imageUrl);
+                    }));
+        }
+        if (hasLink) {
+            rows.add(makeSheetActionRow(tc, R.drawable.ic_copy, iconColor,
+                    getString(R.string.sheet_action_copy_link), textColor, false, v -> {
+                        dialog.dismiss();
+                        copyTextToClipboard(linkUrl);
+                    }));
+            if (linkUrl.regionMatches(true, 0, "http://", 0, 7)
+                    || linkUrl.regionMatches(true, 0, "https://", 0, 8)) {
+                rows.add(makeSheetActionRow(tc, R.drawable.ic_open_external, iconColor,
+                        getString(R.string.sheet_action_open_external), textColor, false, v -> {
+                            dialog.dismiss();
+                            try {
+                                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(linkUrl)));
+                            } catch (Exception ignored) {
+                            }
+                        }));
+            }
+        }
+
+        for (int i = 0; i < rows.size(); i++) {
+            if (i > 0) {
+                View divider = new View(tc);
+                LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
+                dlp.leftMargin = dp(48);
+                dlp.rightMargin = dp(14);
+                divider.setLayoutParams(dlp);
+                divider.setBackgroundColor(lineColor);
+                actionsCard.addView(divider);
+            }
+            actionsCard.addView(rows.get(i));
+        }
+
+        cancelBtn.setOnClickListener(v -> dialog.dismiss());
+        dialog.setOnDismissListener(d -> {
+            if (activeContextDialog == dialog) activeContextDialog = null;
+        });
+
+        Window w = dialog.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            w.setGravity(Gravity.BOTTOM);
+            WindowManager.LayoutParams lp = w.getAttributes();
+            lp.width = WindowManager.LayoutParams.MATCH_PARENT;
+            lp.height = WindowManager.LayoutParams.WRAP_CONTENT;
+            lp.dimAmount = 0.45f;
+            w.setAttributes(lp);
+            w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        }
+        activeContextDialog = dialog;
+        dialog.show();
+    }
+
+    private View makeSheetActionRow(Context tc, int iconRes, int iconTint, String label,
+                                    int textColor, boolean bold, View.OnClickListener onClick) {
+        LinearLayout row = new LinearLayout(tc);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(dp(50));
+        row.setPadding(dp(16), dp(12), dp(16), dp(12));
+        row.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_row));
+        row.setClickable(true);
+        row.setFocusable(true);
+        row.setOnClickListener(onClick);
+
+        ImageView iv = new ImageView(tc);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(20), dp(20));
+        iv.setLayoutParams(ilp);
+        iv.setImageResource(iconRes);
+        iv.setImageTintList(ColorStateList.valueOf(iconTint));
+        row.addView(iv);
+
+        TextView tv = new TextView(tc);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(12);
+        tv.setLayoutParams(tlp);
+        tv.setText(label);
+        tv.setTextColor(textColor);
+        tv.setTextSize(14.5f);
+        if (bold) tv.setTypeface(Typeface.DEFAULT_BOLD);
+        row.addView(tv);
+        return row;
+    }
+
+    private void copyTextToClipboard(String text) {
+        if (text == null || text.isEmpty()) return;
+        try {
+            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (cm != null) {
+                cm.setPrimaryClip(ClipData.newPlainText("Muse", text));
+                toast(getString(R.string.toast_copied));
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    // ---------- 应用内在线检查更新与一键安装（方案 A） ----------
+
+    private void refreshUpdateCardUi() {
+        if (updateCard == null) return;
+        Context tc = themedContext();
+        int textPrimary = ContextCompat.getColor(tc, R.color.text_primary);
+        int textMuted = ContextCompat.getColor(tc, R.color.text_muted);
+        int blue = ContextCompat.getColor(tc, R.color.blue);
+        int btnGrayText = ContextCompat.getColor(tc, R.color.btn_gray_text);
+
+        updateCard.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_card));
+        if (updateCardTitle != null) updateCardTitle.setTextColor(textPrimary);
+        if (updateBadgeDot != null) {
+            updateBadgeDot.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_update_dot));
+            updateBadgeDot.setVisibility(availableUpdate != null ? View.VISIBLE : View.GONE);
+        }
+        if (updateVersionSub != null) {
+            if (availableUpdate != null) {
+                updateVersionSub.setText(getString(R.string.drawer_update_available, availableUpdate.versionName));
+                updateVersionSub.setTextColor(blue);
+            } else {
+                updateVersionSub.setText(getString(R.string.drawer_update_current, BuildConfig.VERSION_NAME));
+                updateVersionSub.setTextColor(textMuted);
+            }
+        }
+        if (btnCheckUpdate != null) {
+            if (checkingUpdate) {
+                btnCheckUpdate.setText(R.string.drawer_update_checking);
+                btnCheckUpdate.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_editbtn));
+                btnCheckUpdate.setTextColor(textMuted);
+                btnCheckUpdate.setEnabled(false);
+            } else if (availableUpdate != null) {
+                btnCheckUpdate.setText(R.string.drawer_update_go);
+                btnCheckUpdate.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_editbtn_ok));
+                btnCheckUpdate.setTextColor(Color.WHITE);
+                btnCheckUpdate.setEnabled(true);
+            } else {
+                btnCheckUpdate.setText(R.string.drawer_update_check);
+                btnCheckUpdate.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_editbtn));
+                btnCheckUpdate.setTextColor(btnGrayText);
+                btnCheckUpdate.setEnabled(true);
+            }
+        }
+    }
+
+    private String currentAccountProxy() {
+        if (store == null) return "";
+        Account cur = store.findById(store.getCurrentId());
+        return (cur != null && cur.proxy != null) ? cur.proxy.trim() : "";
+    }
+
+    private void checkForUpdates(boolean userInitiated) {
+        if (checkingUpdate || isFinishing() || isDestroyed()) return;
+        checkingUpdate = true;
+        refreshUpdateCardUi();
+        final String proxy = currentAccountProxy();
+        downloadExecutor.execute(() -> {
+            try {
+                AppUpdateHelper.ReleaseInfo info = AppUpdateHelper.fetchLatestRelease(proxy);
+                if (store != null) store.setLastUpdateCheckAt(System.currentTimeMillis());
+                boolean newer = AppUpdateHelper.isNewerVersion(info.versionName, BuildConfig.VERSION_NAME);
+                runOnUiThread(() -> {
+                    checkingUpdate = false;
+                    if (isFinishing() || isDestroyed()) return;
+                    if (newer) {
+                        availableUpdate = info;
+                        refreshUpdateCardUi();
+                        String skipped = store != null ? store.getSkippedUpdateTag() : "";
+                        if (userInitiated || !info.tagName.equalsIgnoreCase(skipped)) {
+                            showUpdateDialog(info);
+                        }
+                    } else {
+                        availableUpdate = null;
+                        refreshUpdateCardUi();
+                        if (userInitiated) {
+                            toast(getString(R.string.toast_update_latest, BuildConfig.VERSION_NAME));
+                        }
+                    }
+                });
+            } catch (Exception e) {
+                Log.w("MuseUpdate", "check update failed: " + e.getMessage());
+                runOnUiThread(() -> {
+                    checkingUpdate = false;
+                    refreshUpdateCardUi();
+                    if (userInitiated && !isFinishing() && !isDestroyed()) {
+                        toast(getString(R.string.toast_update_check_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void showUpdateDialog(AppUpdateHelper.ReleaseInfo info) {
+        if (info == null || isFinishing() || isDestroyed()) return;
+        if (activeUpdateDialog != null) {
+            try {
+                activeUpdateDialog.dismiss();
+            } catch (Exception ignored) {
+            }
+            activeUpdateDialog = null;
+        }
+        Context tc = themedContext();
+        View content = LayoutInflater.from(tc).inflate(R.layout.dialog_app_update, null);
+        TextView verBadge = content.findViewById(R.id.updateDialogVersion);
+        TextView notesView = content.findViewById(R.id.updateDialogNotes);
+        View notesScroll = content.findViewById(R.id.updateDialogNotesScroll);
+        TextView btnNow = content.findViewById(R.id.btnUpdateNow);
+        TextView btnLater = content.findViewById(R.id.btnUpdateLater);
+        TextView btnSkip = content.findViewById(R.id.btnUpdateSkip);
+        TextView btnBrowser = content.findViewById(R.id.btnUpdateBrowser);
+
+        if (info.apkSizeBytes > 0) {
+            verBadge.setText(getString(R.string.update_dialog_version_size_fmt,
+                    BuildConfig.VERSION_NAME, info.versionName,
+                    MediaDownloadHelper.formatBytes(info.apkSizeBytes)));
+        } else {
+            verBadge.setText(getString(R.string.update_dialog_version_fmt,
+                    BuildConfig.VERSION_NAME, info.versionName));
+        }
+        String notes = (info.notes != null && !info.notes.isEmpty())
+                ? info.notes : getString(R.string.update_notes_default);
+        notesView.setText(notes);
+        // 限制更新日志卡片最大高度，确保小屏不溢出
+        notesView.post(() -> {
+            int maxH = dp(210);
+            if (notesScroll.getHeight() > maxH) {
+                ViewGroup.LayoutParams lp = notesScroll.getLayoutParams();
+                lp.height = maxH;
+                notesScroll.setLayoutParams(lp);
+            }
+        });
+
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setContentView(content);
+        dialog.setCanceledOnTouchOutside(true);
+
+        btnNow.setOnClickListener(v -> {
+            dialog.dismiss();
+            if (drawerLayout != null && drawerLayout.isDrawerOpen(drawerContent)) {
+                drawerLayout.closeDrawer(drawerContent);
+            }
+            startApkUpdateDownload(info);
+        });
+        btnLater.setOnClickListener(v -> dialog.dismiss());
+        btnSkip.setOnClickListener(v -> {
+            if (store != null) store.setSkippedUpdateTag(info.tagName);
+            dialog.dismiss();
+        });
+        btnBrowser.setOnClickListener(v -> {
+            dialog.dismiss();
+            openExternalUrl(info.htmlUrl);
+        });
+        dialog.setOnDismissListener(d -> {
+            if (activeUpdateDialog == dialog) activeUpdateDialog = null;
+        });
+
+        Window w = dialog.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            WindowManager.LayoutParams lp = w.getAttributes();
+            int screenW = getResources().getDisplayMetrics().widthPixels;
+            lp.width = Math.min(dp(336), Math.max(dp(260), screenW - dp(40)));
+            lp.height = WindowManager.LayoutParams.WRAP_CONTENT;
+            lp.dimAmount = 0.48f;
+            w.setAttributes(lp);
+            w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        }
+        activeUpdateDialog = dialog;
+        dialog.show();
+    }
+
+    private void startApkUpdateDownload(AppUpdateHelper.ReleaseInfo info) {
+        if (info == null) return;
+        if (info.apkUrl == null || info.apkUrl.isEmpty()) {
+            toast(getString(R.string.toast_update_no_apk));
+            openExternalUrl(info.htmlUrl);
+            return;
+        }
+        if (activeUpdateCancelFlag != null) {
+            activeUpdateCancelFlag.set(true);
+        }
+        final AtomicBoolean cancelFlag = new AtomicBoolean(false);
+        activeUpdateCancelFlag = cancelFlag;
+        final String fileName = (info.apkName != null && !info.apkName.isEmpty())
+                ? info.apkName : ("muse-launcher-" + info.tagName + ".apk");
+        final File destFile = new File(new File(getCacheDir(), "updates"), fileName);
+        final String proxy = currentAccountProxy();
+        final long[] lastUiAt = {0L};
+
+        showDownloadProgressBanner(UPDATE_DOWNLOAD_TOKEN, fileName, 0L, info.apkSizeBytes);
+        downloadExecutor.execute(() -> {
+            try {
+                File apk = AppUpdateHelper.downloadApkToFile(
+                        info.apkUrl, destFile, proxy,
+                        new MediaDownloadHelper.DownloadProgressListener() {
+                            @Override
+                            public void onProgress(long downloadedBytes, long totalBytes) {
+                                if (cancelFlag.get()) return;
+                                long now = SystemClock.uptimeMillis();
+                                if (downloadedBytes > 0 && (now - lastUiAt[0]) < 150L) return;
+                                lastUiAt[0] = now;
+                                long displayTotal = totalBytes > 0 ? totalBytes : info.apkSizeBytes;
+                                runOnUiThread(() -> {
+                                    if (!cancelFlag.get() && UPDATE_DOWNLOAD_TOKEN.equals(bannerDownloadToken)) {
+                                        showDownloadProgressBanner(
+                                                UPDATE_DOWNLOAD_TOKEN, fileName, downloadedBytes, displayTotal);
+                                    }
+                                });
+                            }
+
+                            @Override
+                            public boolean isCancelled() {
+                                return cancelFlag.get();
+                            }
+                        });
+                runOnUiThread(() -> {
+                    if (activeUpdateCancelFlag == cancelFlag) activeUpdateCancelFlag = null;
+                    if (cancelFlag.get() || isFinishing() || isDestroyed()) return;
+                    pendingInstallApk = apk;
+                    showUpdateReadyBanner(apk);
+                    requestInstallApk(apk);
+                });
+            } catch (MediaDownloadHelper.DownloadCancelledException ignored) {
+                runOnUiThread(() -> {
+                    if (activeUpdateCancelFlag == cancelFlag) activeUpdateCancelFlag = null;
+                });
+            } catch (Exception e) {
+                Log.w("MuseUpdate", "APK download failed: " + e.getMessage());
+                runOnUiThread(() -> {
+                    if (activeUpdateCancelFlag == cancelFlag) activeUpdateCancelFlag = null;
+                    if (UPDATE_DOWNLOAD_TOKEN.equals(bannerDownloadToken)) {
+                        bannerDownloadToken = null;
+                        bannerShowsApkReady = false;
+                        hideDownloadBannerAnimated();
+                    }
+                    if (!isFinishing() && !isDestroyed()) {
+                        toast(getString(R.string.toast_update_download_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void showUpdateReadyBanner(File apkFile) {
+        if (isFinishing() || isDestroyed() || downloadBanner == null || apkFile == null) return;
+        bannerDownloadToken = null;
+        bannerShowsApkReady = true;
+        Context tc = themedContext();
+        if (downloadBadge != null && downloadBadgeIcon != null) {
+            downloadBadge.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_download_badge_done));
+            downloadBadgeIcon.setImageResource(R.drawable.ic_check);
+            downloadBadgeIcon.setImageTintList(ColorStateList.valueOf(Color.WHITE));
+        }
+        if (textDownloadTitle != null) textDownloadTitle.setText(R.string.update_banner_ready);
+        if (textDownloadSaved != null) textDownloadSaved.setText(apkFile.getName());
+        if (downloadProgressBar != null) {
+            downloadProgressBar.setIndeterminate(false);
+            downloadProgressBar.setVisibility(View.GONE);
+        }
+        if (btnOpenDownload != null) {
+            btnOpenDownload.setVisibility(View.VISIBLE);
+            btnOpenDownload.setText(R.string.update_btn_install);
+            btnOpenDownload.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_pill_btn_primary));
+            btnOpenDownload.setTextColor(Color.WHITE);
+        }
+        revealDownloadBannerAnimated();
+        mainHandler.removeCallbacks(hideDownloadBannerRunnable);
+        mainHandler.postDelayed(hideDownloadBannerRunnable, 8000);
+    }
+
+    private void requestInstallApk(File apkFile) {
+        if (apkFile == null || !apkFile.exists() || isFinishing() || isDestroyed()) return;
+        pendingInstallApk = apkFile;
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            toast(getString(R.string.toast_update_install_permission));
+            try {
+                Intent permIntent = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + getPackageName()));
+                installPermissionLauncher.launch(permIntent);
+            } catch (Exception e) {
+                toast(getString(R.string.toast_update_install_failed));
+            }
+            return;
+        }
+        launchApkInstaller(apkFile);
+    }
+
+    private void launchApkInstaller(File apkFile) {
+        if (apkFile == null || !apkFile.exists()) return;
+        try {
+            Uri uri = FileProvider.getUriForFile(
+                    this, BuildConfig.APPLICATION_ID + ".fileprovider", apkFile);
+            Intent install = new Intent(Intent.ACTION_VIEW);
+            install.setDataAndType(uri, "application/vnd.android.package-archive");
+            install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(install);
+        } catch (Exception e) {
+            Log.w("MuseUpdate", "launch installer failed: " + e.getMessage());
+            toast(getString(R.string.toast_update_install_failed));
+        }
+    }
+
+    private void openExternalUrl(String url) {
+        if (url == null || url.trim().isEmpty()) return;
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url.trim())));
+        } catch (Exception ignored) {
+        }
     }
 
     @Override
     public void onBackPressed() {
-        if (drawerLayout == null) {
+        if (customFullscreenView != null) {
+            exitCustomFullscreenVideo();
+        } else if (drawerLayout == null) {
             finish();
         } else if (fullscreen) {
             exitFullscreen();
@@ -1388,8 +2939,7 @@ public class MainActivity extends AppCompatActivity {
             WebView old = webViews.remove(evictedId);
             if (old != null) {
                 webLoaded.remove((int) evictedId);
-                webContainer.removeView(old);
-                old.destroy();
+                destroyWebView(old);
                 Log.i("MuseWebview", "lru evict id=" + evictedId);
             }
         }
@@ -1402,6 +2952,7 @@ public class MainActivity extends AppCompatActivity {
             target.reload();
         }
         hideErrorOverlay();
+        resetPageLoadProgress();
         updateBackToMuseButton();
 
         if (animate) showSplashFor(a);
@@ -1455,8 +3006,7 @@ public class MainActivity extends AppCompatActivity {
         if (wv != null) {
             if (wv == currentWebView) currentWebView = null;
             webLoaded.remove((int) id);
-            webContainer.removeView(wv);
-            wv.destroy();
+            destroyWebView(wv);
         }
         // 同步清理：头像图片文件 + 桌面上残留的快捷方式（置灰失效）
         AvatarStore.clear(this, id);
@@ -1470,11 +3020,17 @@ public class MainActivity extends AppCompatActivity {
         else updateBackToMuseButton();
     }
 
-    private void refreshLogged() {
+    private void refreshLogged(boolean force) {
+        long now = SystemClock.uptimeMillis();
+        if (!force && lastLoggedProbeAt > 0
+                && (now - lastLoggedProbeAt) < ResourcePolicy.LOGGED_PROBE_THROTTLE_MS) {
+            return;
+        }
         if (!probeRunning.compareAndSet(false, true)) {
             probeDirty.set(true); // 已有一轮在跑，结束后补一轮
             return;
         }
+        lastLoggedProbeAt = now;
         probeQueue = new ArrayList<>(store.all());
         probeIndex = 0;
         probeChanged = false;
@@ -1485,7 +3041,7 @@ public class MainActivity extends AppCompatActivity {
         if (probeQueue == null || probeIndex >= probeQueue.size()) {
             probeQueue = null;
             probeRunning.set(false);
-            if (probeDirty.compareAndSet(true, false)) refreshLogged();
+            if (probeDirty.compareAndSet(true, false)) refreshLogged(true);
             return;
         }
         int end = Math.min(probeIndex + PROBE_CHUNK, probeQueue.size());

@@ -86,6 +86,13 @@ final class AvatarStore {
         new AtomicFile(file(c, id)).delete();
     }
 
+    /** 系统内存紧张或退到后台时清空位图缓存（磁盘文件保留，下次按需重新解码） */
+    static void trimMemory() {
+        synchronized (CACHE) {
+            CACHE.evictAll();
+        }
+    }
+
     /** 只返回标准化 PNG 草稿，不保存选择器 URI，不需要长期媒体权限。 */
     static byte[] readAndConvert(Context c, Uri uri) {
         try (InputStream in = c.getContentResolver().openInputStream(uri)) {

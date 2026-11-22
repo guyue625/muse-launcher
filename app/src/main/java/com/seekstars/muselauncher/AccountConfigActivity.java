@@ -254,9 +254,14 @@ public class AccountConfigActivity extends AppCompatActivity {
         if (shortcut != null) shortcut.setEnabled(!importing);
     }
 
-    /** 创建桌面快捷方式：随机令牌首次生成并入库；名称/头像取该账号已保存的状态 */
+    /** 创建桌面快捷方式：若有未保存的名称/头像草稿则先自动保存，确保桌面图标与当前预览一致 */
     private void createShortcut() {
-        if (importing || !refreshAccount()) return;
+        if (importing) return;
+        if (hasUnsavedChanges()) {
+            if (!persist()) return;
+        } else if (!refreshAccount()) {
+            return;
+        }
         if (account.shortcutToken == null) {
             account.shortcutToken = UUID.randomUUID().toString();
             if (!store.save()) {
@@ -269,6 +274,22 @@ public class AccountConfigActivity extends AppCompatActivity {
         Toast.makeText(this,
                 ok ? R.string.toast_shortcut_requested : R.string.toast_shortcut_unsupported,
                 Toast.LENGTH_SHORT).show();
+    }
+
+    private boolean hasUnsavedChanges() {
+        if (pendingPng != null || pendingClear) return true;
+        if (account == null) return false;
+        String avatar = AvatarTile.normalize(avatarInput.getText().toString());
+        if (!TextUtils.equals(avatar, account.avatar)) return true;
+        String name = nameInput.getText().toString().trim();
+        if (!name.isEmpty()) {
+            String clipped = name.length() > 16 ? name.substring(0, 16) : name;
+            if (!TextUtils.equals(clipped, account.name)) return true;
+        }
+        String proxy = proxyInput.getText().toString().trim();
+        if (!TextUtils.equals(proxy, account.proxy != null ? account.proxy : "")) return true;
+        String tags = TextUtils.join(", ", account.tags);
+        return !TextUtils.equals(tagsInput.getText().toString().trim(), tags);
     }
 
     /**

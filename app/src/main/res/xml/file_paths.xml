@@ -3,4 +3,7 @@
     <cache-path
         name="upload_captures"
         path="captures/" />
+    <cache-path
+        name="app_updates"
+        path="updates/" />
 </paths>

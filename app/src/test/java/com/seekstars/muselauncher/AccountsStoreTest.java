@@ -277,4 +277,21 @@ public class AccountsStoreTest {
         AccountsStore s3 = new AccountsStore(kv);
         assertTrue(s3.isDarkTheme());
     }
+
+    /** 自定义下载目录默认空串，设置与重置跨实例持久化 */
+    @Test
+    public void downloadTreeUri_defaultEmptyAndPersists() {
+        FakeKv kv = new FakeKv();
+        AccountsStore s1 = new AccountsStore(kv);
+        assertEquals("", s1.getDownloadTreeUri());
+
+        String uri = "content://com.android.externalstorage.documents/tree/primary%3ADownload%2FMyMuse";
+        s1.setDownloadTreeUri(uri);
+        AccountsStore s2 = new AccountsStore(kv);
+        assertEquals(uri, s2.getDownloadTreeUri());
+
+        s2.setDownloadTreeUri("");
+        AccountsStore s3 = new AccountsStore(kv);
+        assertEquals("", s3.getDownloadTreeUri());
+    }
 }

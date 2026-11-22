@@ -20,6 +20,9 @@ public class AccountsStore {
     private static final String PREFS = "accounts";
     private static final String KEY_FULLSCREEN = "fullscreen";
     private static final String KEY_THEME = "theme_mode";
+    private static final String KEY_DOWNLOAD_TREE_URI = "download_tree_uri";
+    private static final String KEY_LAST_UPDATE_CHECK = "last_update_check_ms";
+    private static final String KEY_SKIPPED_UPDATE_TAG = "skipped_update_tag";
 
     private final KeyValueStore prefs;
     private final List<Account> accounts = new ArrayList<>();
@@ -174,5 +177,32 @@ public class AccountsStore {
 
     public void setDarkTheme(boolean dark) {
         prefs.putString(KEY_THEME, dark ? "dark" : "light");
+    }
+
+    /** 自定义下载目录（SAF Tree URI）；空串表示使用默认目录（相册 / Download/Muse） */
+    public String getDownloadTreeUri() {
+        String v = prefs.getString(KEY_DOWNLOAD_TREE_URI, "");
+        return v == null ? "" : v;
+    }
+
+    public void setDownloadTreeUri(String treeUri) {
+        prefs.putString(KEY_DOWNLOAD_TREE_URI, treeUri == null ? "" : treeUri.trim());
+    }
+
+    public long getLastUpdateCheckAt() {
+        return prefs.getLong(KEY_LAST_UPDATE_CHECK, 0L);
+    }
+
+    public void setLastUpdateCheckAt(long timestampMs) {
+        prefs.putLong(KEY_LAST_UPDATE_CHECK, Math.max(0L, timestampMs));
+    }
+
+    public String getSkippedUpdateTag() {
+        String v = prefs.getString(KEY_SKIPPED_UPDATE_TAG, "");
+        return v == null ? "" : v;
+    }
+
+    public void setSkippedUpdateTag(String tag) {
+        prefs.putString(KEY_SKIPPED_UPDATE_TAG, tag == null ? "" : tag.trim());
     }
 }
