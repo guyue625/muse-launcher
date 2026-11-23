@@ -150,6 +150,18 @@ muse.ai 是 Meta 服务，国内网络直连不通。新建环境会**自动继�
 ./gradlew assembleDebug
 ```
 
+## 🍎 macOS 个人自用版
+
+仓库包含独立原生 macOS 版本，需 macOS 14 或更新版本及 Xcode Command Line Tools：
+
+```bash
+xcode-select --install
+./macos/build.sh
+open "macos/build/muse 多开器.app"
+```
+
+默认继承 macOS 系统代理（包括 Clash 系统代理），也可为单个账号设置代理。无需付费 Apple 开发者账户。若 Gatekeeper 首次拦截本地构建的应用，在 Finder 中按住 Control 点击应用，选择“打开”并确认。macOS 版本说明见 [`macos/README.md`](macos/README.md)。
+
 ## 🔒 隐私
 
 - 应用**不包含任何统计、上报或第三方 SDK**（仅 androidx.webkit / appcompat）；
