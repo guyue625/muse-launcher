@@ -3126,28 +3126,49 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private View makeRailAvatar(Context tc, Account a) {
-        FrameLayout wrap = new FrameLayout(this);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(40), dp(40));
-        lp.topMargin = dp(4);
-        lp.bottomMargin = dp(4);
-        wrap.setLayoutParams(lp);
-        wrap.setBackground(ContextCompat.getDrawable(tc, a.id == store.getCurrentId()
-                ? R.drawable.bg_rail_active : R.drawable.bg_rail_btn));
+        boolean active = a.id == store.getCurrentId();
 
-        View tile = makeTile(tc, a, dp(38), 20f);
-        wrap.addView(tile, new FrameLayout.LayoutParams(dp(38), dp(38), Gravity.CENTER));
+        FrameLayout row = new FrameLayout(this);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(48));
+        rlp.topMargin = dp(2);
+        rlp.bottomMargin = dp(2);
+        row.setLayoutParams(rlp);
+
+        // 左侧边缘高对比选中指示条（类似 Discord / Slack，收缩态一眼辨认当前会话）
+        if (active) {
+            View bar = new View(this);
+            bar.setBackground(ContextCompat.getDrawable(tc, R.drawable.bg_rail_indicator));
+            FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
+                    Math.max(dp(4), Math.round(getResources().getDisplayMetrics().density * 3.5f)),
+                    dp(24),
+                    Gravity.START | Gravity.CENTER_VERTICAL);
+            row.addView(bar, blp);
+        }
+
+        // 外框 44dp + 内头像 36dp，留出完整 2dp 蓝环 + 2dp 呼吸间距，不再被头像本体遮挡
+        FrameLayout wrap = new FrameLayout(this);
+        wrap.setBackground(ContextCompat.getDrawable(tc,
+                active ? R.drawable.bg_rail_active : R.drawable.bg_rail_btn));
+        row.addView(wrap, new FrameLayout.LayoutParams(dp(44), dp(44), Gravity.CENTER));
+
+        View tile = makeTile(tc, a, dp(36), 19f);
+        if (!active) {
+            tile.setAlpha(darkTheme ? 0.68f : 0.82f);
+        }
+        wrap.addView(tile, new FrameLayout.LayoutParams(dp(36), dp(36), Gravity.CENTER));
 
         View dot = new View(this);
         dot.setBackground(ContextCompat.getDrawable(tc,
                 a.logged ? R.drawable.bg_dot_on : R.drawable.bg_dot_off));
-        FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(dp(10), dp(10),
+        FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(dp(11), dp(11),
                 Gravity.BOTTOM | Gravity.END);
-        dlp.rightMargin = dp(1);
-        dlp.bottomMargin = dp(1);
+        dlp.rightMargin = dp(2);
+        dlp.bottomMargin = dp(2);
         wrap.addView(dot, dlp);
 
-        wrap.setOnClickListener(v -> switchTo(a.id, true));
-        return wrap;
+        row.setOnClickListener(v -> switchTo(a.id, true));
+        return row;
     }
 
     private View makeDrawerRow(Context tc, Account a) {
