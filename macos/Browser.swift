@@ -9,6 +9,7 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate {
     var didChange: (() -> Void)?
     private(set) var failure: String?
     private(set) var isLoading = false
+    private(set) var hasCommittedPage = false
     private var lastRequest = URLRequest(url: home)
     private var timeoutWork: DispatchWorkItem?
 
@@ -21,9 +22,7 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate {
         )
         configuration.userContentController.addUserScript(languageScript)
         let dataStore = WKWebsiteDataStore(forIdentifier: account.id)
-        if let proxy = try AccountProxy(account.proxy) {
-            dataStore.proxyConfigurations = [proxy.configuration]
-        }
+        dataStore.proxyConfigurations = try AccountProxy(account.proxy).map { [$0.configuration] } ?? []
         configuration.websiteDataStore = dataStore
         configuration.preferences.isElementFullscreenEnabled = true
         view = WKWebView(frame: .zero, configuration: configuration)
@@ -38,11 +37,14 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate {
         var request = URLRequest(url: URL(string: "https://muse.ai/?locale=en_US")!)
         request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
         lastRequest = request
+        beginLoading()
         view.load(request)
     }
 
     func reload() {
-        if failure != nil || view.url == nil { view.load(lastRequest) }
+        let retryRequest = failure != nil || view.url == nil
+        beginLoading()
+        if retryRequest { view.load(lastRequest) }
         else { view.reload() }
     }
 
@@ -107,6 +109,10 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        beginLoading()
+    }
+
+    private func beginLoading() {
         timeoutWork?.cancel()
         isLoading = true
         failure = nil
@@ -115,14 +121,23 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate {
             guard let self, self.isLoading else { return }
             self.isLoading = false
             self.failure = "连接超时。检查网络，或在账号设置中配置代理后重试。"
+            self.timeoutWork = nil
+            self.view.stopLoading()
             self.didChange?()
         }
         timeoutWork = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: timeout)
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finishLoading() }
-    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { didChange?() }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        hasCommittedPage = true
+        failure = nil
+        finishLoading()
+    }
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        hasCommittedPage = true
+        didChange?()
+    }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         navigationFailed(error)
@@ -134,7 +149,8 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         failure = "网页进程已退出，请重新加载。"
-        didChange?()
+        hasCommittedPage = false
+        finishLoading()
     }
 
     private func navigationFailed(_ error: Error) {

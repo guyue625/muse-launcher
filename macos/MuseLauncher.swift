@@ -22,6 +22,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSo
     private let browserHost = NSView()
     private let address = NSTextField(labelWithString: "muse.ai")
     private let status = NSTextField(wrappingLabelWithString: "")
+    private let statusPanel = NSStackView()
+    private let loadingIndicator = NSProgressIndicator()
+    private let navigationLoadingIndicator = NSProgressIndicator()
     private let back = NSButton()
     private let reload = NSButton()
     private let home = NSButton()
@@ -176,18 +179,34 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSo
         home.toolTip = "返回 Muse"
         address.textColor = .secondaryLabelColor
         address.font = .systemFont(ofSize: 13, weight: .medium)
-        let navigation = NSStackView(views: [back, reload, home, address])
+        navigationLoadingIndicator.style = .spinning
+        navigationLoadingIndicator.controlSize = .small
+        navigationLoadingIndicator.isIndeterminate = true
+        navigationLoadingIndicator.isDisplayedWhenStopped = false
+        navigationLoadingIndicator.setAccessibilityLabel("网页正在加载")
+        let navigation = NSStackView(views: [back, reload, home, address, navigationLoadingIndicator])
+        navigation.setVisibilityPriority(.mustHold, for: navigationLoadingIndicator)
         navigation.spacing = 10
         let navigationDivider = NSBox()
         navigationDivider.boxType = .separator
 
         [sidebar, divider, navigation, navigationDivider, browserHost].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; root.addSubview($0) }
         [caption, scroll, actions].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; sidebar.addSubview($0) }
-        status.translatesAutoresizingMaskIntoConstraints = false
         status.alignment = .center
-        status.textColor = .secondaryLabelColor
+        status.textColor = .labelColor
         status.maximumNumberOfLines = 0
-        browserHost.addSubview(status)
+        loadingIndicator.style = .spinning
+        loadingIndicator.controlSize = .regular
+        loadingIndicator.isIndeterminate = true
+        loadingIndicator.isDisplayedWhenStopped = false
+        loadingIndicator.setAccessibilityLabel("正在连接 Muse")
+        statusPanel.orientation = .vertical
+        statusPanel.alignment = .centerX
+        statusPanel.spacing = 16
+        statusPanel.addArrangedSubview(loadingIndicator)
+        statusPanel.addArrangedSubview(status)
+        statusPanel.translatesAutoresizingMaskIntoConstraints = false
+        browserHost.addSubview(statusPanel)
 
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor), sidebar.topAnchor.constraint(equalTo: root.topAnchor),
@@ -204,9 +223,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSo
             navigationDivider.topAnchor.constraint(equalTo: navigation.bottomAnchor, constant: 7),
             browserHost.leadingAnchor.constraint(equalTo: divider.trailingAnchor), browserHost.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             browserHost.topAnchor.constraint(equalTo: navigationDivider.bottomAnchor), browserHost.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            status.centerXAnchor.constraint(equalTo: browserHost.centerXAnchor), status.centerYAnchor.constraint(equalTo: browserHost.centerYAnchor),
-            status.leadingAnchor.constraint(greaterThanOrEqualTo: browserHost.leadingAnchor, constant: 24),
-            status.trailingAnchor.constraint(lessThanOrEqualTo: browserHost.trailingAnchor, constant: -24)
+            navigationLoadingIndicator.widthAnchor.constraint(equalToConstant: 16),
+            navigationLoadingIndicator.heightAnchor.constraint(equalToConstant: 16),
+            loadingIndicator.widthAnchor.constraint(equalToConstant: 32), loadingIndicator.heightAnchor.constraint(equalToConstant: 32),
+            statusPanel.centerXAnchor.constraint(equalTo: browserHost.centerXAnchor), statusPanel.centerYAnchor.constraint(equalTo: browserHost.centerYAnchor),
+            statusPanel.leadingAnchor.constraint(greaterThanOrEqualTo: browserHost.leadingAnchor, constant: 24),
+            statusPanel.trailingAnchor.constraint(lessThanOrEqualTo: browserHost.trailingAnchor, constant: -24)
         ])
         window.makeKeyAndOrderFront(nil)
     }
@@ -239,7 +261,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSo
                 self?.updateNavigation()
             }
             browser.view.translatesAutoresizingMaskIntoConstraints = false
-            browserHost.addSubview(browser.view)
+            browserHost.addSubview(browser.view, positioned: .below, relativeTo: statusPanel)
             NSLayoutConstraint.activate([
                 browser.view.leadingAnchor.constraint(equalTo: browserHost.leadingAnchor),
                 browser.view.trailingAnchor.constraint(equalTo: browserHost.trailingAnchor),
@@ -262,15 +284,23 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSo
         reload.isEnabled = browser != nil
         settings.isEnabled = currentAccount != nil
         remove.isEnabled = currentAccount != nil
+        let isLoading = browser?.isLoading == true && browser?.failure == nil
+        let showsInitialLoading = isLoading && browser?.hasCommittedPage == false
         if let failure = browser?.failure {
             status.stringValue = "无法打开 muse.ai\n\n\(failure)"
-        } else if browser?.isLoading == true {
-            status.stringValue = "正在连接 muse.ai…\n\n如果当前网络无法访问，请在账号设置中填写代理。"
+        } else if showsInitialLoading {
+            status.stringValue = "正在加载 Muse…\n\n首次连接可能需要几秒，请稍候。"
         } else {
             status.stringValue = ""
         }
-        status.isHidden = browser == nil || (browser?.failure == nil && browser?.isLoading == false)
-        browser?.view.isHidden = browser?.failure != nil
+        statusPanel.isHidden = browser == nil || (browser?.failure == nil && !showsInitialLoading)
+        loadingIndicator.isHidden = !showsInitialLoading
+        navigationLoadingIndicator.isHidden = !isLoading
+        if showsInitialLoading { loadingIndicator.startAnimation(nil) }
+        else { loadingIndicator.stopAnimation(nil) }
+        if isLoading { navigationLoadingIndicator.startAnimation(nil) }
+        else { navigationLoadingIndicator.stopAnimation(nil) }
+        browser?.view.isHidden = showsInitialLoading || (browser?.failure != nil && browser?.hasCommittedPage == false)
     }
 
     @objc private func goBack() { currentBrowser?.view.goBack() }
@@ -282,12 +312,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSo
     private func showEditor(existing: Account?, draft: (String, String)? = nil, error: String? = nil) {
         let alert = NSAlert()
         alert.messageText = existing == nil ? "添加账号" : "账号设置"
-        if let error { alert.informativeText = error }
+        alert.informativeText = error ?? "默认代理为 \(defaultProxyAddress)。留空则使用 macOS 系统代理。"
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
         let name = NSTextField(string: draft?.0 ?? existing?.name ?? "Muse \(state.accounts.count + 1)")
-        let proxy = NSTextField(string: draft?.1 ?? existing?.proxy ?? "")
-        proxy.placeholderString = "127.0.0.1:7890"
+        let proxy = NSTextField(string: draft?.1 ?? (existing == nil ? defaultProxyAddress : existing?.proxy ?? ""))
+        proxy.placeholderString = "留空使用系统代理"
         let grid = NSGridView(views: [[NSTextField(labelWithString: "名称"), name], [NSTextField(labelWithString: "代理"), proxy]])
         grid.columnSpacing = 12
         grid.rowSpacing = 8
@@ -298,16 +328,17 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSo
         alert.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .alertFirstButtonReturn else { return }
             let title = name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let proxyAddress = proxy.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty else { self.showEditor(existing: existing, draft: (name.stringValue, proxy.stringValue), error: "请输入账号名称。"); return }
-            do { _ = try AccountProxy(proxy.stringValue) }
+            do { _ = try AccountProxy(proxyAddress) }
             catch { self.showEditor(existing: existing, draft: (title, proxy.stringValue), error: error.localizedDescription); return }
             if let existing, let index = self.state.accounts.firstIndex(where: { $0.id == existing.id }) {
                 self.discardBrowser(existing.id)
                 self.state.accounts[index].name = title
-                self.state.accounts[index].proxy = proxy.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : proxy.stringValue
+                self.state.accounts[index].proxy = proxyAddress.isEmpty ? nil : proxyAddress
             } else {
                 var created = Account(name: title)
-                created.proxy = proxy.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : proxy.stringValue
+                created.proxy = proxyAddress.isEmpty ? nil : proxyAddress
                 self.state.accounts.append(created)
                 self.activeID = created.id
                 self.state.selectedID = created.id

@@ -1,6 +1,8 @@
 import Foundation
 import Network
 
+let defaultProxyAddress = "127.0.0.1:7897"
+
 struct Account: Codable, Identifiable {
     let id: UUID
     var name: String
@@ -9,6 +11,7 @@ struct Account: Codable, Identifiable {
     init(name: String) {
         id = UUID()
         self.name = name
+        proxy = defaultProxyAddress
     }
 }
 
@@ -16,6 +19,24 @@ struct AccountState: Codable {
     var accounts: [Account] = [Account(name: "Muse 1")]
     var selectedID: UUID?
     var pendingDeletions: [UUID] = []
+    var schemaVersion = 2
+
+    private enum CodingKeys: String, CodingKey {
+        case accounts
+        case selectedID
+        case pendingDeletions
+        case schemaVersion
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        accounts = try container.decodeIfPresent([Account].self, forKey: .accounts) ?? [Account(name: "Muse 1")]
+        selectedID = try container.decodeIfPresent(UUID.self, forKey: .selectedID)
+        pendingDeletions = try container.decodeIfPresent([UUID].self, forKey: .pendingDeletions) ?? []
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+    }
 }
 
 struct AccountFile {
@@ -30,7 +51,16 @@ struct AccountFile {
 
     func load() throws -> AccountState {
         do {
-            return try JSONDecoder().decode(AccountState.self, from: Data(contentsOf: url))
+            var state = try JSONDecoder().decode(AccountState.self, from: Data(contentsOf: url))
+            if state.schemaVersion < 2 {
+                for index in state.accounts.indices {
+                    let proxy = state.accounts[index].proxy?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if proxy.isEmpty { state.accounts[index].proxy = defaultProxyAddress }
+                }
+                state.schemaVersion = 2
+                try save(state)
+            }
+            return state
         } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {
             let state = AccountState()
             try save(state)
@@ -79,6 +109,6 @@ enum ProxyInputError: LocalizedError {
     case invalidAddress
 
     var errorDescription: String? {
-        "请输入带端口的 HTTP、HTTPS 或 SOCKS5 代理地址（例如 127.0.0.1:7890）。暂不支持代理账密。"
+        "请输入带端口的 HTTP、HTTPS 或 SOCKS5 代理地址（例如 127.0.0.1:7897）。暂不支持代理账密。"
     }
 }
