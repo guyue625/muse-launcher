@@ -12,8 +12,9 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var hasCommittedPage = false
     private var lastRequest = URLRequest(url: home)
     private var timeoutWork: DispatchWorkItem?
+    private var hasOpenPanel = false
 
-    init(account: Account) throws {
+    init(account: Account, restoring url: URL? = nil) throws {
         let configuration = WKWebViewConfiguration()
         let languageScript = WKUserScript(
             source: "Object.defineProperty(Navigator.prototype, 'language', { get: () => 'en-US' }); Object.defineProperty(Navigator.prototype, 'languages', { get: () => ['en-US', 'en'] });",
@@ -21,24 +22,58 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate {
             forMainFrameOnly: false
         )
         configuration.userContentController.addUserScript(languageScript)
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: BrowserResources.script, injectionTime: .atDocumentStart, forMainFrameOnly: true
+        ))
         let dataStore = WKWebsiteDataStore(forIdentifier: account.id)
         dataStore.proxyConfigurations = try AccountProxy(account.proxy).map { [$0.configuration] } ?? []
         configuration.websiteDataStore = dataStore
         configuration.preferences.isElementFullscreenEnabled = true
+        configuration.preferences.inactiveSchedulingPolicy = .throttle
         view = WKWebView(frame: .zero, configuration: configuration)
         super.init()
         view.allowsBackForwardNavigationGestures = true
         view.navigationDelegate = self
         view.uiDelegate = self
-        goHome()
+        if let url { load(url) }
+        else { goHome() }
     }
 
     func goHome() {
-        var request = URLRequest(url: URL(string: "https://muse.ai/?locale=en_US")!)
+        load(URL(string: "https://muse.ai/?locale=en_US")!)
+    }
+
+    private func load(_ url: URL) {
+        var request = URLRequest(url: url)
         request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
         lastRequest = request
         beginLoading()
         view.load(request)
+    }
+
+    func canDiscard(completion: @escaping (Bool) -> Void) {
+        guard !isLoading, !hasOpenPanel, view.cameraCaptureState == .none,
+              view.microphoneCaptureState == .none, !BrowserDownloads.shared.isDownloading else {
+            completion(false)
+            return
+        }
+        view.evaluateJavaScript(BrowserResources.canDiscardScript) { [weak self] result, error in
+            guard let self, error == nil, !self.isLoading, !self.hasOpenPanel,
+                  self.view.cameraCaptureState == .none, self.view.microphoneCaptureState == .none,
+                  !BrowserDownloads.shared.isDownloading else { completion(false); return }
+            completion(result as? Bool == true)
+        }
+    }
+
+    func dispose() {
+        timeoutWork?.cancel()
+        timeoutWork = nil
+        didChange = nil
+        view.navigationDelegate = nil
+        view.uiDelegate = nil
+        view.stopLoading()
+        view.pauseAllMediaPlayback(completionHandler: nil)
+        view.removeFromSuperview()
     }
 
     func reload() {
@@ -93,11 +128,13 @@ final class Browser: NSObject, WKNavigationDelegate, WKUIDelegate {
         panel.canChooseFiles = !parameters.allowsDirectories
         panel.canChooseDirectories = parameters.allowsDirectories
         panel.allowsMultipleSelection = parameters.allowsMultipleSelection
-        let finish: (NSApplication.ModalResponse) -> Void = { result in
+        hasOpenPanel = true
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] result in
+            self?.hasOpenPanel = false
             completionHandler(result == .OK ? panel.urls : nil)
         }
         if let window = webView.window { panel.beginSheetModal(for: window, completionHandler: finish) }
-        else { completionHandler(nil) }
+        else { hasOpenPanel = false; completionHandler(nil) }
     }
 
     func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
@@ -181,6 +218,8 @@ final class BrowserDownloads: NSObject, WKDownloadDelegate {
 
     private var downloads: [ObjectIdentifier: WKDownload] = [:]
     private var destinations: [ObjectIdentifier: Destination] = [:]
+
+    var isDownloading: Bool { !downloads.isEmpty }
 
     func start(_ download: WKDownload) {
         downloads[ObjectIdentifier(download)] = download

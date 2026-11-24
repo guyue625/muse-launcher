@@ -35,7 +35,11 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var state = AccountState()
     private var activeID: UUID?
     private var browsers: [UUID: Browser] = [:]
-    private var recentlyUsed: [UUID] = []
+    private var suspendedURLs: [UUID: URL] = [:]
+    private var pendingReclaims: Set<UUID> = []
+    private var resourceTimer: Timer?
+    private var memoryPressure: DispatchSourceMemoryPressure?
+    private var hiddenSince: Date?
     private var updatingTable = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -59,6 +63,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         activeID = state.accounts.first { $0.id == state.selectedID }?.id ?? state.accounts.first?.id
         refreshAccounts()
         showSelectedAccount()
+        configureResourceManagement()
         state.pendingDeletions.forEach(purge)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -72,7 +77,49 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
+        hiddenSince = Date()
         return false
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) { hiddenSince = Date() }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        hiddenSince = nil
+        if currentBrowser == nil { showSelectedAccount() }
+    }
+
+    private func configureResourceManagement() {
+        resourceTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reclaimIdleBrowsers() }
+        }
+        resourceTimer?.tolerance = 5
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated { self?.reclaimIdleBrowsers() }
+        }
+        source.resume()
+        memoryPressure = source
+    }
+
+    private func reclaimIdleBrowsers() {
+        let hidden = !window.isVisible || window.isMiniaturized
+        let canReclaimSelected = hidden && hiddenSince.map { Date().timeIntervalSince($0) >= BrowserResources.hiddenPageDelay } == true
+        for (id, browser) in browsers {
+            guard id != activeID || canReclaimSelected else { continue }
+            guard pendingReclaims.insert(id).inserted else { continue }
+            browser.canDiscard { [weak self, weak browser] safe in
+                guard let self else { return }
+                self.pendingReclaims.remove(id)
+                guard safe, let browser, self.browsers[id] === browser else { return }
+                if id == self.activeID {
+                    guard !self.window.isVisible || self.window.isMiniaturized,
+                          let hiddenSince = self.hiddenSince,
+                          Date().timeIntervalSince(hiddenSince) >= BrowserResources.hiddenPageDelay else { return }
+                }
+                self.suspendedURLs[id] = browser.view.url
+                self.discardBrowser(id)
+            }
+        }
     }
 
     private func configureStatusItem() {
@@ -95,7 +142,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     @objc private func showWindow() {
+        hiddenSince = nil
         if window.isMiniaturized { window.deminiaturize(nil) }
+        if currentBrowser == nil { showSelectedAccount() }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -292,8 +341,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         browsers.values.forEach { $0.view.removeFromSuperview() }
         guard let account = currentAccount else { updateNavigation(); return }
         do {
-            let browser = try browsers[account.id] ?? Browser(account: account)
+            let browser = try browsers[account.id] ?? Browser(account: account, restoring: suspendedURLs[account.id])
             browsers[account.id] = browser
+            suspendedURLs.removeValue(forKey: account.id)
             browser.didChange = { [weak self] in
                 guard self?.activeID == account.id else { return }
                 self?.updateNavigation()
@@ -306,9 +356,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 browser.view.topAnchor.constraint(equalTo: browserHost.topAnchor),
                 browser.view.bottomAnchor.constraint(equalTo: browserHost.bottomAnchor)
             ])
-            recentlyUsed.removeAll { $0 == account.id }
-            recentlyUsed.append(account.id)
-            while recentlyUsed.count > 3, let oldest = recentlyUsed.first { discardBrowser(oldest) }
+            reclaimIdleBrowsers()
             updateNavigation()
         } catch { showError("无法打开网页", error.localizedDescription) }
     }
@@ -401,8 +449,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     private func delete(_ account: Account) {
         guard savePendingDeletion(account.id) else { return }
-        browsers.removeValue(forKey: account.id)?.view.removeFromSuperview()
-        recentlyUsed.removeAll { $0 == account.id }
+        discardBrowser(account.id)
+        suspendedURLs.removeValue(forKey: account.id)
         state.accounts.removeAll { $0.id == account.id }
         state.pendingDeletions.append(account.id)
         if state.accounts.isEmpty { state.accounts.append(Account(name: "Muse 1")) }
@@ -429,8 +477,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func discardBrowser(_ id: UUID) {
-        browsers.removeValue(forKey: id)?.view.removeFromSuperview()
-        recentlyUsed.removeAll { $0 == id }
+        browsers.removeValue(forKey: id)?.dispose()
     }
 
     private func save(_ newState: AccountState) -> Bool {

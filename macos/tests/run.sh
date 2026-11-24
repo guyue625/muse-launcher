@@ -12,3 +12,11 @@ xcrun swiftc -parse-as-library -swift-version 5 \
     "$SOURCE_DIR/Accounts.swift" "$SCRIPT_DIR/AccountsTests.swift" \
     -o "$OUTPUT_DIR/AccountsTests"
 "$OUTPUT_DIR/AccountsTests"
+
+xcrun swiftc -parse-as-library -swift-version 5 \
+    -target "$(uname -m)-apple-macosx14.0" \
+    -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
+    -framework AppKit -framework WebKit \
+    "$SOURCE_DIR/BrowserResources.swift" "$SCRIPT_DIR/BrowserResourcesTests.swift" \
+    -o "$OUTPUT_DIR/BrowserResourcesTests"
+"$OUTPUT_DIR/BrowserResourcesTests"
