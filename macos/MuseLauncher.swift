@@ -8,13 +8,13 @@ enum MuseLauncherApp {
         let application = NSApplication.shared
         let delegate = LauncherDelegate()
         application.delegate = delegate
-        application.setActivationPolicy(.regular)
+        application.setActivationPolicy(.accessory)
         application.run()
     }
 }
 
 @MainActor
-final class LauncherDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable],
                                   backing: .buffered, defer: false)
@@ -30,6 +30,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSo
     private let home = NSButton()
     private let settings = NSButton()
     private let remove = NSButton()
+    private var statusItem: NSStatusItem?
     private var file: AccountFile!
     private var state = AccountState()
     private var activeID: UUID?
@@ -53,6 +54,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSo
             return
         }
         configureMenu()
+        configureStatusItem()
         buildWindow()
         activeID = state.accounts.first { $0.id == state.selectedID }?.id ?? state.accounts.first?.id
         refreshAccounts()
@@ -61,7 +63,42 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSo
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        showWindow()
+        return true
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
+        return false
+    }
+
+    private func configureStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let menu = NSMenu(title: "muse 多开器")
+
+        let open = menu.addItem(withTitle: "打开 muse 多开器", action: #selector(showWindow), keyEquivalent: "")
+        open.target = self
+        let refresh = menu.addItem(withTitle: "重新加载网页", action: #selector(reloadPage), keyEquivalent: "")
+        refresh.target = self
+        menu.addItem(.separator())
+        let quit = menu.addItem(withTitle: "退出 muse 多开器", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+        quit.target = NSApp
+
+        item.button?.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "muse 多开器")
+        item.button?.toolTip = "muse 多开器"
+        item.button?.setAccessibilityLabel("muse 多开器")
+        item.menu = menu
+        statusItem = item
+    }
+
+    @objc private func showWindow() {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
     func numberOfRows(in tableView: NSTableView) -> Int { state.accounts.count }
 
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
@@ -126,6 +163,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSo
     }
 
     private func buildWindow() {
+        window.delegate = self
         let root = NSView()
         window.contentView = root
         window.minSize = NSSize(width: 660, height: 460)

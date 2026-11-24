@@ -16,6 +16,8 @@ The app stores account names in `~/Library/Application Support/MuseLauncher/acco
 
 The first page load shows a centered spinner and loading message instead of a blank page. A smaller toolbar spinner stays visible during subsequent navigation and refreshes without hiding the existing page. Loading indicators stop when loading finishes or fails; a connection that takes longer than 30 seconds shows a timeout message with retry guidance.
 
+The app runs as a menu-bar-only app without a Dock icon. Closing its window hides it in the background without stopping the app or its browser sessions. Click the muse menu-bar icon to open the menu, then choose **打开 muse 多开器**, **重新加载网页**, or **退出 muse 多开器**.
+
 New accounts use `127.0.0.1:7897` by default (the local Clash proxy). Existing accounts without a proxy are migrated to this default once; custom proxy addresses are preserved. Clear the proxy field to use the macOS system proxy instead; that choice persists after restarting. Per-account HTTP, HTTPS CONNECT, and SOCKS5 proxies are supported, but proxy credentials are not supported yet. If the page cannot connect, check that Clash is running and that the saved port matches its listening port.
 
 It does not yet implement avatar/tag editing, automated updates, or the Android-only shortcut and automation features. The app is ad-hoc signed for local use. If Gatekeeper blocks a locally built copy, Control-click the app, choose **Open**, then confirm. Do not disable Gatekeeper globally.
